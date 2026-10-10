@@ -162,10 +162,17 @@ def step_env_file() -> Step:
 
 
 def step_api_key() -> Step:
+    """检查有没有配模型 API Key。
+
+    注意这里**返回 ok=True**（即使没配），只在 detail/action 里说明。
+    理由：不配 Key 也能跑通全部测试、演示和本地聊天，
+    接真实模型是可选增强。早先把它标成 ✗ 会让"完成，但有 N 项需要你处理"
+    里混进一个其实不必处理的项目——用户实测反馈过这种噪音。
+    这一点和 `--setup` 的设计原则一致：只把**真正需要动手**的事标成未完成。
+    """
     env = os.path.join(ROOT, ".env")
     if not os.path.isfile(env):
-        return Step("模型 API Key", False, "还没有 .env",
-                    action="先完成上一步")
+        return Step("模型 API Key", True, "还没有 .env（下一步会生成）")
     key = ""
     try:
         with open(env, encoding="utf-8", errors="ignore") as fh:
@@ -177,9 +184,8 @@ def step_api_key() -> Step:
         pass
     if key:
         return Step("模型 API Key", True, f"已配置（长度 {len(key)}）")
-    return Step("模型 API Key", False, "未配置",
-                action="在 .env 里填 LLM_API_KEY=你的key\n"
-                       "    不填也可以：离线 mock 模式能跑通全部测试与演示")
+    return Step("模型 API Key", True, "未配置——**不影响使用**（走离线 mock）",
+                action="想接真实模型时：在 .env 里填 LLM_API_KEY=你的key")
 
 
 def step_selftest() -> Step:

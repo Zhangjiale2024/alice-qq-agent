@@ -88,10 +88,49 @@ def is_ignored(rel: str, patterns: list[str]) -> bool:
     return False
 
 
+# 明显是占位符/示例值的，不作为"真实值"去反查。
+#
+# **为什么必须有这个**：`.env.example` 里的 `OWNER_IDS` 用的是示例号 `10001`。
+# 用户从模板生成 `.env` 之后，扫描器会把它当成"真实值"，
+# 于是在全项目里找出 163 处 `10001` 的匹配（cli.py 的默认参数、
+# 各种测试夹具……），报一大堆根本不该报的东西。
+#
+# 第一版设计得不严谨：**完全依赖 .env 的内容判断什么是"真实值"**，
+# 于是用户配置里只要出现示例号，扫描就废了。
+# 现在改成：先用这份名单排掉明显是占位的值，只对剩下的做反查。
+PLACEHOLDER_VALUES = {
+    "10001", "10002", "10003", "10004", "10005", "10006", "10007",
+    "10008", "10020", "10030", "10040", "123456", "12345678",
+    "88888888", "99999999", "123456789", "1234567890", "123456789012",
+    "20001", "20002", "1", "0", "your_key", "your-key", "test",
+}
+
+
+def _looks_like_placeholder(value: str) -> bool:
+    """这个值看起来是不是示例/占位，而不是用户真实的凭据或标识。"""
+    v = value.strip()
+    if not v:
+        return True
+    if v in PLACEHOLDER_VALUES:
+        return True
+    low = v.lower()
+    if any(w in low for w in ("your", "example", "placeholder", "xxx",
+                              "todo", "changeme", "test", "demo", "<", ">")):
+        return True
+    # 连续重复字符（如 000000）也当占位
+    if len(set(v)) <= 2 and len(v) >= 6:
+        return True
+    return False
+
+
 def real_secrets(root: str) -> dict[str, str]:
     """从真实 .env 里取出实际值，用它去反查代码里有没有残留。
 
     这比"猜哪个数字像 QQ 号"精确得多——只报**确实是你本人的**信息。
+
+    但**不能完全信任 .env 的内容**：如果用户从模板生成配置后没改，
+    里面就是示例号。所以先过一遍 `_looks_like_placeholder()`，
+    否则会把示例号当成真实值、报出上百条误报（实测踩过）。
     """
     found: dict[str, str] = {}
     path = os.path.join(root, ".env")
@@ -109,10 +148,9 @@ def real_secrets(root: str) -> dict[str, str]:
             key, value = key.strip(), value.strip()
             if key not in wanted or not value:
                 continue
-            # OWNER_IDS 可能是逗号分隔的多个
             for item in re.split(r"[,;\s]+", value):
                 item = item.strip()
-                if len(item) >= 5:
+                if len(item) >= 5 and not _looks_like_placeholder(item):
                     found[item] = key
     return found
 
