@@ -256,13 +256,17 @@ def step_hook() -> Step:
 
 # ---------------------------------------------------------------- 外部依赖
 
+# 注意这里的多行字符串**每行都不能带额外缩进**：
+# 打印时会统一加 4 个空格，如果源码里再缩进就会出现
+# "第 2 行比第 1 行多缩进" 的错位（用户第一眼看到的就是这段，
+# 实测反馈过。改动后请跑一次 `python -m aliceqq --setup` 目视确认）。
 EXTERNAL = [
     ("QQ 客户端 + NapCat", "接真实 QQ 才需要",
      "1) 装 QQNT 并登录机器人账号\n"
-     "    2) 装 NapCat（https://github.com/NapNeko/NapCatQQ）\n"
-     "    3) NapCat 里加一个**反向 WebSocket 客户端**，地址填：\n"
-     "         ws://127.0.0.1:8095/onebot/v11/ws\n"
-     "    4) 然后运行： python -m aliceqq --serve"),
+     "2) 装 NapCat（https://github.com/NapNeko/NapCatQQ）\n"
+     "3) NapCat 里加一个**反向 WebSocket 客户端**，地址填：\n"
+     "     ws://127.0.0.1:8095/onebot/v11/ws\n"
+     "4) 然后运行： python -m aliceqq --serve"),
     ("本地 TTS（可选）", "要爱丽丝音色才需要",
      "GPT-SoVITS 部署在别处时，在 .env 里指到它的地址：\n"
      "      TTS_PROVIDER=gptsovits\n"
