@@ -46,10 +46,28 @@ class Step:
 
 
 def _run(cmd: List[str], timeout: int = 900) -> Tuple[int, str]:
+    """跑一个子进程并把输出按 UTF-8 收回来。
+
+    **必须显式给子进程设 UTF-8 环境**，这是实测踩出来的：
+    在中文 Windows 上默认控制台编码是 cp936(GBK)，子进程（pip、
+    自检脚本）往管道里写非 GBK 能表示的内容时就会报
+
+        decoding with 'cp936' codec failed
+
+    用户第一次在干净目录跑 `--setup` 时就撞上了这个，
+    报错还发生在"装依赖"这一步，看起来像是网络或包的问题，
+    完全指不到真因。
+
+    注意 `cwd=ROOT` 也是必要的：自检脚本要靠相对路径找 `.gitignore`
+    和 `tests/`，换个工作目录就会得出错误结论。
+    """
     try:
+        env = dict(os.environ)
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
         p = subprocess.run(cmd, capture_output=True, text=True,
                            encoding="utf-8", errors="ignore",
-                           cwd=ROOT, timeout=timeout)
+                           cwd=ROOT, timeout=timeout, env=env)
         return p.returncode, ((p.stdout or "") + (p.stderr or "")).strip()
     except Exception as exc:
         return 1, f"{type(exc).__name__}: {exc}"
@@ -179,21 +197,38 @@ def step_selftest() -> Step:
 
 
 def step_repo_health() -> Step:
-    """跑项目自检（只看必须修的那类）。"""
+    """跑项目自检（只看必须修的那类）。
+
+    **解析要稳**：用户实测反馈过一次"项目自检：✗（后面空白）"，
+    什么都看不到，比直接报错还糟——因为完全不知道该做什么。
+    所以这里当解析不出内容时，**把原始输出的末尾带出去**，
+    哪怕乱码也比空白强（至少能看出是脚本崩了、还是符号没匹配上）。
+    """
     script = os.path.join(ROOT, "scripts", "项目自检.py")
     if not os.path.isfile(script):
         return Step("项目自检", True, "跳过（缺脚本）", skipped=True)
     print("    正在自检（隐私、体积、文档一致性等）...")
-    code, out = _run([sys.executable, script], timeout=1200)
+    target = _venv_python() or sys.executable
+    code, out = _run([target, script], timeout=1200)
+
     summary = ""
     for line in out.splitlines():
         if line.startswith("通过"):
-            summary = line
+            summary = line.strip()
     fails = [l.strip() for l in out.splitlines() if l.strip().startswith("✗")]
+
     if code == 0:
         return Step("项目自检", True, summary or "全部通过")
-    return Step("项目自检", False, summary,
-                action="需要修的项：\n    " + "\n    ".join(fails[:5]))
+
+    detail = summary or "（没能从输出里解析出结论）"
+    if not fails:
+        # 解析失败时兜底：带出原始输出末尾，便于定位到底哪一步出的问题
+        tail = [l for l in out.strip().splitlines() if l.strip()][-6:]
+        detail = (detail + "\n    原始输出末尾：\n"
+                  + "\n".join("      " + l for l in tail))
+    return Step("项目自检", False, detail,
+                action="需要修的项：\n    " + "\n    ".join(fails[:6])
+                if fails else "手动跑一次看详情：python scripts\\项目自检.py")
 
 
 def step_hook() -> Step:

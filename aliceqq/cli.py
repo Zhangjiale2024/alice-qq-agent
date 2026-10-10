@@ -194,7 +194,12 @@ def run_repl(args) -> int:
     scene = "私聊" if is_private else f"群 {group_id}"
     mode_note = "真实模型" if args.live else "离线 mock"
     print(f"爱丽丝模拟器（场景：{scene}，用户：{user_id} / {args.name}，模型：{mode_note}）")
-    print("输入消息开始聊天；:mode 查看模式，:prompt 显示提示词，:quit 退出。\n")
+    print("输入消息开始聊天。")
+    print("  :mode              查看当前模式与记忆条数")
+    print("  :prompt            重看**上一条**消息注入的提示词")
+    print("  :prompt <内容>     先发这条消息，再打印它的提示词")
+    print("  :quit              退出\n")
+    last_outcome = None
     while True:
         try:
             raw = input("你 > ").strip()
@@ -209,16 +214,37 @@ def run_repl(args) -> int:
             profile = engine.storage.ensure_profile(user_id, args.name, engine.config.bot.default_mode)
             print(f"[模式] {profile.mode}；记忆 {engine.storage.count_memory(user_id)} 条")
             continue
-        show_prompt = raw == ":prompt"
-        if show_prompt:
-            raw = input("（这次要发给爱丽丝的内容）你 > ").strip()
-            if not raw:
+
+        # :prompt 的两种用法。
+        # 之前只支持"先问内容再显示"，很容易误解：敲了 `:prompt` 之后
+        # 又出现一个提示符，用户顺手就把 `prompt` 当成消息发进去了
+        # （实机试的时候就发生了）。所以现在默认重看**上一条**——
+        # 那才是"我想看看刚才那句被怎么组装"的常见诉求。
+        show_prompt = False
+        if raw == ":prompt":
+            if last_outcome is None:
+                print("（还没有发过消息，先用 :prompt <内容> 的形式）")
                 continue
-        mentioned = args.mention or (not is_private and engine.config.bot.character in raw)
-        outcome = engine.handle(IncomingMessage(
-            user_id=user_id, text=raw, is_private=is_private, group_id=group_id,
-            user_name=args.name, mentioned=mentioned, force_reply=args.force,
-        ))
+            show_prompt = True
+            outcome = last_outcome
+        elif raw.startswith(":prompt "):
+            text = raw[len(":prompt "):].strip()
+            if not text:
+                continue
+            show_prompt = True
+            mentioned = args.mention or (not is_private and engine.config.bot.character in text)
+            outcome = engine.handle(IncomingMessage(
+                user_id=user_id, text=text, is_private=is_private, group_id=group_id,
+                user_name=args.name, mentioned=mentioned, force_reply=args.force,
+            ))
+            last_outcome = outcome
+        else:
+            mentioned = args.mention or (not is_private and engine.config.bot.character in raw)
+            outcome = engine.handle(IncomingMessage(
+                user_id=user_id, text=raw, is_private=is_private, group_id=group_id,
+                user_name=args.name, mentioned=mentioned, force_reply=args.force,
+            ))
+            last_outcome = outcome
         _print_outcome(outcome, show_prompt=show_prompt, trace=args.trace,
                         config=engine.config)
 

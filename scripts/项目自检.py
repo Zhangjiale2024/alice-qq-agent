@@ -137,14 +137,38 @@ def check_secrets(rep: Report) -> None:
 
 
 def check_env_structure(rep: Report) -> None:
-    print("\n【4】真实 .env 结构")
+    print("\n【4】.env 结构")
     script = os.path.join(ROOT, "scripts", "env审计.py")
+    if not os.path.isfile(script):
+        rep.add(WARN, "跳过（缺审计脚本）")
+        return
+
+    # 4a) **模板**也要查。这是踩过的坑：
+    # `.env.example` 里曾经有三段重复的 TTS 配置，且值互相冲突——
+    # `TTS_VC_BLEND` 一处给了 `alice_ja:0.7,alice_zh:0.3`、另一处给了空值，
+    # **空值静默覆盖了它**，混合音色怎么调都不生效。
+    # 因为只检查了 `.env`（而 `.env` 不入库、每个人不同），
+    # 模板里的这个缺陷藏了很久，直到有人在干净目录 clone 才暴露。
+    example = os.path.join(ROOT, ".env.example")
+    if os.path.isfile(example):
+        code, out = run([PY, script, example])
+        if "✗" in out:
+            bad = [l for l in out.splitlines() if "✗" in l]
+            rep.add(FAIL, ".env.example 里有重复键",
+                    "用户从它生成 .env 时会继承这个缺陷。"
+                    "**后面的值会静默覆盖前面的**\n"
+                    + "\n".join("    " + l.strip() for l in bad[:8]))
+        else:
+            rep.add(PASS, ".env.example 无重复键（模板是干净的）")
+    else:
+        rep.add(FAIL, "找不到 .env.example", "新用户无法生成配置")
+
+    # 4b) 真实的 .env
     env = os.path.join(ROOT, ".env")
-    if not os.path.isfile(script) or not os.path.isfile(env):
-        rep.add(WARN, "跳过（缺 .env 或审计脚本）")
+    if not os.path.isfile(env):
+        rep.add(PASS, "暂无 .env（还没配置过，正常）")
         return
     code, out = run([PY, script, env])
-    # 只看"重复键"和"BOM"这两个真问题
     if "✗" in out:
         bad = [l for l in out.splitlines() if "✗" in l]
         rep.add(FAIL, ".env 有结构问题（重复键会让配置静默失效）", "\n".join(bad[:8]))
