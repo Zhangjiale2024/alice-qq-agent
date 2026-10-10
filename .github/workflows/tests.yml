@@ -1,0 +1,84 @@
+name: tests
+
+# 为什么值得有 CI：这个项目的卖点之一是"706 项离线测试"。
+# 光在 README 里写这句没有说服力，CI 徽章才是**可验证**的证据——
+# 任何人点进来都能看到最近一次在干净环境里跑过、并且全绿。
+#
+# 核心逻辑是纯标准库实现，所以**不需要安装任何依赖**就能跑全部测试。
+# 这也顺便证明了这个设计约束是真的，而不是 README 里的口号。
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 跨平台：核心逻辑不依赖平台，这里把这个约束**验证**出来。
+        # Windows 尤其重要——本项目大量问题都是 Windows 特有的
+        # （页面文件、路径分隔符、控制台编码）。
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.12"]
+
+    env:
+      # 测试里大量中文断言；编码不对会出现"莫名其妙的失败"。
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # 刻意**不装任何依赖**：核心与测试只依赖标准库。
+      # 如果哪天有人不小心引入了第三方导入，这一步之后就会失败——
+      # 相当于一条自动化的架构约束检查。
+      - name: 确认核心包零第三方依赖
+        shell: bash
+        run: |
+          python - <<'PY'
+          import ast, os, sys
+          mods = set()
+          for root, _, files in os.walk("aliceqq"):
+              if "__pycache__" in root:
+                  continue
+              for name in files:
+                  if not name.endswith(".py"):
+                      continue
+                  tree = ast.parse(open(os.path.join(root, name), encoding="utf-8").read())
+                  for node in ast.walk(tree):
+                      if isinstance(node, ast.Import):
+                          mods.update(a.name.split(".")[0] for a in node.names)
+                      elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                          mods.add(node.module.split(".")[0])
+          allowed = {"faster_whisper", "nonebot", "torch"}   # 均为可选/延迟导入
+          bad = sorted(m for m in mods
+                       if m not in sys.stdlib_module_names and m not in allowed)
+          if bad:
+              print("核心包引入了第三方依赖:", bad)
+              raise SystemExit(1)
+          print("核心包依赖检查通过（除可选导入外全部标准库）")
+          PY
+
+      - name: 跑全部单元测试
+        shell: bash
+        run: python -m unittest discover -s tests -t . -v
+
+      - name: 提示词模板变量完整性
+        shell: bash
+        run: python -m aliceqq --check
+
+      - name: 端到端演示（离线 mock）
+        shell: bash
+        run: python -m aliceqq --demo
+
+      - name: 一条命令看全景（同时打印代码指纹）
+        shell: bash
+        run: python -m aliceqq --test-plan

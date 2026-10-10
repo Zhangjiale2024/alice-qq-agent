@@ -1,0 +1,13 @@
+# V1 核心逻辑零第三方依赖（纯标准库）。
+# 只有在接入真实 QQ 时才需要以下依赖：
+
+# --- 接入 QQ（NoneBot2 + OneBot v11）---
+nonebot2>=2.2.0
+nonebot-adapter-onebot>=2.4.0
+
+# --- 可选：运行测试 ---
+# 测试使用标准库 unittest，无需安装任何东西：
+#   python -m unittest discover -s tests -t .
+
+# --- 可选：如果不用 OpenAI 兼容接口，可换成官方 SDK ---
+# openai>=1.30.0

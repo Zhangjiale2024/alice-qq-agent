@@ -1,0 +1,63 @@
+#!/bin/sh
+# 提交前自动跑保密检查。**从源头阻止泄密。**
+#
+# 为什么必须有这个：靠"记得检查"是不牢靠的。密钥一旦被提交，
+# 删掉文件也没用——它会留在 git 历史里，`git log -p` 就能翻出来。
+# 唯一可靠的做法是**让它根本进不去**。
+#
+# 安装（在仓库根目录执行一次）：
+#     cp scripts/pre-commit .git/hooks/pre-commit
+#     chmod +x .git/hooks/pre-commit      # Windows 上可跳过
+# 或直接运行：
+#     python scripts\安装钩子.py
+#
+# 检查内容：
+#   1. 隐私扫描（真实 .env 的值有没有残留到代码/文档里）
+#   2. 暂存区里有没有 .env / 数据库 / 媒体文件
+# 失败时会明确告诉你怎么修；不想被拦可以用 `git commit --no-verify`，
+# 但那样就要自己承担后果了。
+
+set -e
+
+# 中文输出必须显式设成 UTF-8，否则在 Windows 的 git-bash 里会乱码，
+# 提示看不懂等于没提示。
+export PYTHONUTF8=1
+export PYTHONIOENCODING=utf-8
+
+echo "[pre-commit] 保密检查..."
+
+PY=python
+if [ -x "venv/Scripts/python.exe" ]; then
+  PY="venv/Scripts/python.exe"
+elif [ -x "venv/bin/python" ]; then
+  PY="venv/bin/python"
+fi
+
+FAIL=0
+
+# ---- 1) 暂存区里有没有不该提交的文件 ----
+echo "[pre-commit] 检查暂存区..."
+BAD=$(git diff --cached --name-only | grep -E '(^|/)\.env$|(^|/)\.env\.local$|\.db$|\.db-wal$|\.db-shm$|(^|/)venv/|__pycache__|(^|/)media/.*\.(mp3|jpg|png|wav)$|test-run/|songs/.*\.mp3$' || true)
+if [ -n "$BAD" ]; then
+  echo "[pre-commit] 拒绝提交：暂存区里有不该进版本库的文件"
+  echo "$BAD" | sed 's/^/    /'
+  echo "    修法：git rm --cached <文件>，并确认 .gitignore 覆盖了它"
+  FAIL=1
+fi
+
+# ---- 2) 隐私扫描 ----
+if [ -f "scripts/隐私扫描.py" ]; then
+  if ! "$PY" scripts/隐私扫描.py . ; then
+    echo "[pre-commit] 拒绝提交：隐私扫描未通过"
+    FAIL=1
+  fi
+fi
+
+if [ "$FAIL" -ne 0 ]; then
+  echo ""
+  echo "[pre-commit] 提交被拦下。修完再提交。"
+  echo "             （确实要跳过：git commit --no-verify，但请先想清楚）"
+  exit 1
+fi
+
+echo "[pre-commit] 通过"

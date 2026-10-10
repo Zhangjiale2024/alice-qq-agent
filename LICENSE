@@ -1,0 +1,39 @@
+MIT License
+
+Copyright (c) 2026 Zhangjiale2024
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+## 附加说明：本许可证只覆盖代码
+
+MIT 覆盖的是**本项目作者编写的源代码**。以下内容**不包含在内**，也**不随本仓库分发**：
+
+1. **角色相关的素材与设定**（角色名、台词、性格设定、世界观资料等）——
+   其版权归原作品权利方所有。本仓库中涉及角色的提示词与知识库仅供
+   **技术演示与个人学习**，不代表对相关版权的任何主张。
+2. **声音克隆模型与音频素材**——本仓库**不包含**任何 TTS/SVC 模型权重、
+   参考音频或生成的语音文件。使用者需自行准备，并**自行承担**由此产生的
+   全部法律责任（包括但不限于声音人格权、音乐著作权）。
+3. **第三方服务**——通过本项目调用的大模型、检索、B 站等接口，
+   各自受其服务条款约束，与本许可证无关。
+
+**使用者的义务**：若你将本项目用于公开服务或商业用途，请自行确认
+角色素材、音色素材与音频内容的授权状况；作者不对使用者的此类行为负责。

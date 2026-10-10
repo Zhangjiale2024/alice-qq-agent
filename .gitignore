@@ -1,0 +1,44 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ---- 凭据：**绝不能提交** ----
+# .env 里有真实的 LLM_API_KEY / BOCHA_API_KEY / BILIBILI_SESSDATA。
+# 仓库里只保留 .env.example。
+.env
+.env.local
+.env.*.local
+
+# ---- 运行期数据（会不断增长，不该进版本库）----
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/*.json
+data/groups.json
+data/songs/
+data/tts-samples/
+data/test-kb/
+data/test-media/
+
+# 单个用例一个临时库；曾经累积到 1248 个目录 / 84 MB
+data/test-run/
+data/case-*/
+data/v5-*/
+
+# 测试用的临时目录（曾经散在仓库根目录）
+tmp*/
+
+# ---- 媒体产物：QQ 上收发的图片/表情/语音缓存 ----
+integrations/nonebot/media/
+media/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini

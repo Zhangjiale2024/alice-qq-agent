@@ -1,0 +1,13 @@
+[project]
+name = "alice-qq-agent-nonebot"
+version = "1.0.0"
+description = "爱丽丝 QQ 伙伴 Agent 的 NoneBot2 启动壳"
+requires-python = ">=3.10"
+
+[tool.nonebot]
+adapters = [
+    { name = "OneBot V11", module_name = "nonebot.adapters.onebot.v11" }
+]
+plugins = ["aliceqq.adapters.nonebot_plugin_alice"]
+plugin_dirs = []
+builtin_plugins = []
