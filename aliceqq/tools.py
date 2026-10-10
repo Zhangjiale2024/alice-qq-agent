@@ -93,6 +93,37 @@ def catalog_text(config: AppConfig, search_available: bool = False,
     return "\n".join(lines)
 
 
+def openai_tool_schemas(config: AppConfig, search_available: bool = False,
+                        academic_available: bool = False) -> List[Dict[str, Any]]:
+    r"""把注册表转成 OpenAI 兼容的 tools 参数。
+
+    **为什么必须有这个**：`registry()` 里的 `parameters` 已经写好了 JSON Schema，
+    但引擎从来没把它传给模型——`llm.chat()` 不传 `tools` 时，
+    `reply.tool_calls` **永远是空的**，整套 tool calling 等于没接上线。
+    （`OpenAICompatibleLLM` 早就支持 `tools=` 参数、也解析 `tool_calls`，
+    只是调用方没传。这是实打实的"接线漏了"。）
+
+    只把**available=True** 的工具暴露给模型。
+    这一点是刻意的：把不可用的工具写进 schema，等于给模型递刀子——
+    它会尝试调用、拿到失败结果，或者在回复里演一遍"我去查一下"。
+    而 `catalog_text()` 里仍然会列出不可用的工具并标注"不能尝试调用"，
+    两条信息是一致的，模型不会困惑。
+    """
+    schemas: List[Dict[str, Any]] = []
+    for spec in registry(config, search_available, academic_available).values():
+        if not spec.available:
+            continue
+        schemas.append({
+            "type": "function",
+            "function": {
+                "name": spec.name,
+                "description": spec.description,
+                "parameters": spec.parameters,
+            },
+        })
+    return schemas
+
+
 def call(config: AppConfig, name: str, arguments: Dict[str, Any]) -> ToolResult:
     """V1 的兜底实现：不在这里做真实网络请求，避免编造结果。"""
     reg = registry(config)

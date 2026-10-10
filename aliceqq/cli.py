@@ -72,7 +72,84 @@ def build_engine(args) -> Engine:
     return Engine(config)
 
 
-def _print_outcome(outcome, *, show_prompt: bool = False) -> None:
+def print_trace(outcome, config=None) -> None:
+    r"""打印一次交互的**决策链**。
+
+    为什么要单独做这个：Agent 类项目的价值有一半在"它怎么决定的"——
+    用了哪个模型、是否触发工具、调了什么参数、工具真的成功了吗、
+    有没有被护栏拦下。只给最终回复的话，这些全都看不见，
+    读者只能听你口述。
+
+    输出形如：
+
+        ── 决策链 ──
+        模型      deepseek / deepseek-chat
+        工具目录  remember ✓  web_search ✓  academic_search ✓
+        ① 模型决定调用  web_search({"query": "蔚蓝档案 新活动"})
+        ② 执行结果      成功：检索到 5 条，请给出标题与链接后作答
+        ③ 二次生成      带工具结果再问一次模型 -> 最终回复
+        护栏      memory_rejected: 1
+
+    **只打印真实发生过的事**：没有工具调用就不打这一段，
+    不存在的阶段绝不编造。
+    """
+    debug = (outcome.debug or {}) if hasattr(outcome, "debug") else {}
+    print()
+    print("── 决策链 ──")
+    print(f"  决策      {outcome.decision}"
+          + (f"（{outcome.reason}）" if outcome.reason else ""))
+    provider = debug.get("provider") or "?"
+    model = debug.get("model") or "?"
+    print(f"  模型      {provider} / {model}")
+
+    if config is not None:
+        try:
+            from .tools import registry
+            reg = registry(config,
+                           search_available=config.search.enabled,
+                           academic_available=getattr(config.academic, "enabled", False))
+            items = [f"{s.name}{'✓' if s.available else '✗'}" for s in reg.values()]
+            print(f"  工具目录  {'  '.join(items)}")
+        except Exception:
+            pass
+
+    results = getattr(outcome, "tool_results", None) or []
+    # 是否发生过检索（两条路径都可能：模型主动调工具，或引擎判定为先检索）
+    searched = bool(debug.get("search") or debug.get("academic"))
+    if results:
+        for i, item in enumerate(results, 1):
+            mark = "成功" if item.get("ok") else "失败"
+            print(f"  ① 模型决定调用  {item.get('name')}")
+            print(f"  ② 执行结果      {mark}：{str(item.get('message'))[:90]}")
+        print(f"  ③ 二次生成      把工具结果作为 role=tool 回灌，再问一次模型")
+    elif searched:
+        # 这条路径容易被误解，必须说清楚：模型**没有**主动调工具，
+        # 是引擎判定"这是时效性问题"之后自己先查了，再把结果注入上下文。
+        # 原因是角色扮演模式下很多模型不会去调工具（见 _maybe_search 的注释）。
+        print("  检索路径      引擎判定为先检索（模型未主动调工具）")
+        print("                结果作为上下文注入提示词，不走 role=tool 回灌")
+    else:
+        print("  工具      本轮未触发工具调用，也未判定为需要检索")
+
+    if debug.get("search"):
+        s = debug["search"]
+        print(f"  检索      provider={s.get('provider')} ok={s.get('ok')} "
+              f"条数={s.get('count')} 耗时={s.get('elapsed')}")
+    if debug.get("search_skipped"):
+        print(f"  检索被拦  {debug.get('search_skipped')}（群级开关或额度门禁）")
+    if debug.get("academic"):
+        a = debug["academic"]
+        print(f"  学术      provider={a.get('provider')} ok={a.get('ok')} "
+              f"条数={a.get('count')}")
+    if getattr(outcome, "memory_saved", None):
+        print(f"  记忆落库  {len(outcome.memory_saved)} 条")
+    if getattr(outcome, "memory_rejected", None):
+        print(f"  护栏拦截  memory_rejected: {len(outcome.memory_rejected)} 条"
+              f"（敏感信息按规则不保存）")
+
+
+def _print_outcome(outcome, *, show_prompt: bool = False, trace: bool = False,
+                   config=None) -> None:
     if outcome.reply:
         print(f"爱丽丝 > {outcome.reply}")
     else:
@@ -86,6 +163,8 @@ def _print_outcome(outcome, *, show_prompt: bool = False) -> None:
         notes.append("工具: " + ", ".join(f"{t['name']}={'ok' if t['ok'] else 'fail'}" for t in outcome.tool_results))
     if notes:
         print("[*] " + " | ".join(notes))
+    if trace:
+        print_trace(outcome, config)
     if show_prompt and outcome.prompt_system:
         print("\n----- SYSTEM PROMPT -----")
         print(outcome.prompt_system)
@@ -100,7 +179,8 @@ def run_once(args) -> int:
         mentioned=args.mention, force_reply=args.force,
     )
     outcome = engine.handle(message)
-    _print_outcome(outcome, show_prompt=args.show_prompt)
+    _print_outcome(outcome, show_prompt=args.show_prompt, trace=args.trace,
+                    config=engine.config)
     if not outcome.reply:
         return 1
     return 0
@@ -139,7 +219,8 @@ def run_repl(args) -> int:
             user_id=user_id, text=raw, is_private=is_private, group_id=group_id,
             user_name=args.name, mentioned=mentioned, force_reply=args.force,
         ))
-        _print_outcome(outcome, show_prompt=show_prompt)
+        _print_outcome(outcome, show_prompt=show_prompt, trace=args.trace,
+                        config=engine.config)
 
 
 DEMO_SCRIPT = [
@@ -205,6 +286,8 @@ def main(argv=None) -> int:
     parser.add_argument("--model", default=None, help="配合 --evaluate 指定模型名")
     parser.add_argument("--json", default=None, help="把评估结果写入指定 json 文件")
     # 一键配置与启动：让"拿到项目就能跑"变成两条命令
+    parser.add_argument("--trace", action="store_true",
+                        help="打印决策链：模型、工具调用、检索来源、护栏拦截（Agent 调试用）")
     parser.add_argument("--setup", action="store_true",
                         help="一键配置：检查环境 → 装依赖 → 生成 .env → 自测（可重复执行）")
     parser.add_argument("--serve", action="store_true",

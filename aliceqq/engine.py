@@ -1334,8 +1334,21 @@ class Engine:
 
     def generate_reply(self, message: IncomingMessage, mode: str, outcome: Outcome) -> tuple:
         system, messages, variables = self.build_messages(message, mode)
-        reply = self.llm.chat(messages, config=self.config.llm)
-        debug = {"provider": reply.provider, "model": reply.model, "raw": reply.raw}
+
+        # 把工具 schema 真正传给模型。
+        # **这是修一个接线漏洞**：`OpenAICompatibleLLM.chat()` 一直支持 `tools=`、
+        # 也会解析 `tool_calls`，但调用方从来没传过——于是
+        # `reply.tool_calls` 恒为空，下面那段"执行工具再回灌"的循环**永远不执行**。
+        # 工具以前只是以文字形式写在提示词里（available_tools 变量），
+        # 模型无法真正发起调用，只能"声称"自己用了工具。
+        schemas = tools_mod.openai_tool_schemas(
+            self.config, bool(self.search_service), bool(self.academic_service))
+        debug_tools = [s["function"]["name"] for s in schemas]
+
+        reply = self.llm.chat(messages, config=self.config.llm,
+                              tools=schemas or None)
+        debug = {"provider": reply.provider, "model": reply.model, "raw": reply.raw,
+                 "tools_offered": debug_tools}
         tool_results: List[Dict[str, Any]] = []
 
         if reply.tool_calls:
@@ -1359,7 +1372,9 @@ class Engine:
                 })
             outcome.tool_results = tool_results
             try:
-                second = self.llm.chat(followup_messages, config=self.config.llm)
+                # 二次生成也要带 tools：模型可能想接着调下一个工具
+                second = self.llm.chat(followup_messages, config=self.config.llm,
+                                       tools=schemas or None)
                 if second.text:
                     reply = second
             except LLMError:
