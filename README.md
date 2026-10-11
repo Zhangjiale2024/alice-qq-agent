@@ -5,10 +5,10 @@
 它可以理解用户发来的图片，根据消息决定是否调用工具，查询最新信息，
 保存用户主动要求记住的内容，也会在操作失败时直接说明失败原因。
 
-目前有 917 项离线测试。核心逻辑约 15,000 行，不依赖第三方 Python 包。
+目前有 924 项离线测试。核心逻辑约 15,000 行，不依赖第三方 Python 包。
 
 <p>
-<img alt="tests" src="https://img.shields.io/badge/tests-917%20passing-brightgreen">
+<img alt="tests" src="https://img.shields.io/badge/tests-924%20passing-brightgreen">
 <img alt="deps" src="https://img.shields.io/badge/core%20deps-none-blue">
 <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-blue">
 <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
@@ -351,6 +351,16 @@ integrations/
 1. 核心测试可以完全离线运行；
 2. 更换消息协议时只需要修改适配层；
 3. 只安装 Python 也能运行本地演示。
+
+## 质量基准
+
+多模态理解的准确率是**量过的**，不是感觉。实测数字与三个被数据否掉的
+方案记录在 [docs/多模态质量基准.md](docs/多模态质量基准.md)。
+
+```text
+语音识别   字符错误率 40.6% -> 1.0%（12 条基准，本地 whisper small）
+图片理解   完全正确 8/8，关键事实命中 14/14，编造 0 次
+```
 
 ## 踩过的坑
 

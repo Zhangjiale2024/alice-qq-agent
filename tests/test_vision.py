@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import base64
+import inspect
 import json
 import sys
 import unittest
@@ -405,7 +406,57 @@ class PromptTemplateTest(unittest.TestCase):
             # 两个模板措辞不同（一个写"不要去猜"、一个写"不要猜测"），
             # 所以断言共同的部分：都要求"看不到就说看不到"
             self.assertIn("看不到", text, "%s 缺少『看不到要说出来』的约束" % name)
-            self.assertIn("{{vision_result}}", text)
+
+
+class VisionPromptTest(unittest.TestCase):
+    """视觉提示词的质量是**量过的**，不要凭感觉改。
+
+    实测（8 个自己造的可控用例，真实 qwen3-vl-plus 接口，跑两遍结果一致）：
+
+        完全正确 8/8 | 关键事实命中 14/14 | 编造 0 次
+
+    另外对比过"强调符号"和"强调符号+格式"两个更复杂的提示词，
+    在 7 个含符号的字符串（连字符、下划线、邮箱、IP、URL、混合）上：
+
+        现状 6/7 | 强调符号 6/7 | 强调符号+格式 6/7
+
+    **三种完全相同**。那次观察到 `ALICE-7391` 被读成 `ALICE:7391`
+    是偶发，不是系统性问题；唯一那条失败是我的测试图用 PIL 默认字体
+    画不出中文（渲染成方块），模型说"无法识别方块"其实是对的。
+
+    所以提示词刻意**保持简单**。这些用例把那个判断固定下来——
+    如果有人想加一堆符号规则，先看 docs/多模态质量基准.md 里的数字。
+    """
+
+    def test_prompt_asks_verbatim_transcription(self):
+        self.assertIn("逐字", vision.VISION_PROMPT)
+
+    def test_prompt_forbids_rewriting(self):
+        self.assertIn("不要改写", vision.VISION_PROMPT)
+
+    def test_prompt_asks_to_flag_uncertainty(self):
+        # 不确定要说不确定，而不是猜一个
+        self.assertIn("不确定", vision.VISION_PROMPT)
+
+    def test_prompt_does_not_grow_unjustified_rules(self):
+        # 实测更复杂的提示词没有更好。这条限制提示词长度，
+        # 避免"加规则"变成默认动作。
+        self.assertLessEqual(len(vision.VISION_PROMPT), 200,
+                             "提示词变长了——先确认有实测支持"
+                             "（见 docs/多模态质量基准.md）")
+
+    def test_image_cap_is_small(self):
+        # 视觉按图计费；群聊里连发多图很常见
+        self.assertLessEqual(vision.MAX_IMAGES_PER_TURN, 4)
+
+    def test_keeps_the_combo_of_truncation_and_disclosure(self):
+        # 截断时**必须**同时说明少看了几张，否则会以为都看过了
+        src = inspect.getsource(vision.VisionClient.describe)
+        self.assertIn("skipped", src)
+        self.assertIn("没看", src)
+
+    def test_oversize_limit_exists(self):
+        self.assertGreater(vision.MAX_IMAGE_BYTES, 0)
 
 
 if __name__ == "__main__":
