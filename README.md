@@ -5,10 +5,10 @@
 它可以理解用户发来的图片，根据消息决定是否调用工具，查询最新信息，
 保存用户主动要求记住的内容，也会在操作失败时直接说明失败原因。
 
-目前有 863 项离线测试。核心逻辑约 15,000 行，不依赖第三方 Python 包。
+目前有 880 项离线测试。核心逻辑约 15,000 行，不依赖第三方 Python 包。
 
 <p>
-<img alt="tests" src="https://img.shields.io/badge/tests-863%20passing-brightgreen">
+<img alt="tests" src="https://img.shields.io/badge/tests-880%20passing-brightgreen">
 <img alt="deps" src="https://img.shields.io/badge/core%20deps-none-blue">
 <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-blue">
 <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
