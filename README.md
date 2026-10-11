@@ -5,10 +5,10 @@
 它可以理解用户发来的图片，根据消息决定是否调用工具，查询最新信息，
 保存用户主动要求记住的内容，也会在操作失败时直接说明失败原因。
 
-目前有 806 项离线测试。核心逻辑约 15,200 行，不依赖第三方 Python 包。
+目前有 824 项离线测试。核心逻辑约 15,000 行，不依赖第三方 Python 包。
 
 <p>
-<img alt="tests" src="https://img.shields.io/badge/tests-806%20passing-brightgreen">
+<img alt="tests" src="https://img.shields.io/badge/tests-824%20passing-brightgreen">
 <img alt="deps" src="https://img.shields.io/badge/core%20deps-none-blue">
 <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-blue">
 <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
@@ -153,6 +153,32 @@ VISION_MODEL=qwen3-vl-plus
 ③         将工具结果回灌给模型
 记忆落库  2 条
 ```
+
+## 多轮工具编排
+
+模型可以连续调用多个工具，而不是只调一个就结束。
+
+比如"记住我在做一个 LLM Agent 项目，顺便查一下 ReAct 的论文"，
+它会先调 `remember`，拿到结果后再调 `academic_search`，最后组织回复：
+
+```text
+模型调用次数   3
+工具循环轮数   2
+用到的工具     ["remember", "academic_search"]
+```
+
+三条约束：
+
+**轮数上限默认 3。** 模型可能一直调工具不出结论。撞上限时如实说明
+"查了几轮还没理清楚"，不假装答完了。
+
+**完全相同的调用不重复执行。** 带不同参数不算重复（先查 A 的论文
+再查 B 的是正当用法），但同一个调用再来一次只会浪费额度，
+而且往往意味着模型在绕圈。这种调用会回灌一条"刚刚已经执行过了"，
+否则模型会以为是失败而重试。
+
+**中途失败不再静默。** 以前那一步套着 `except LLMError: pass`，
+失败了什么也不说；现在会把原因记下来并用已有结果组织回复。
 
 ## 检索方式
 

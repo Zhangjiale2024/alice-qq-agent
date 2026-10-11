@@ -45,6 +45,13 @@ MODE_ALICE = characters_mod.MODE_ALICE
 MODE_ASSISTANT = characters_mod.MODE_ASSISTANT
 MODE_WHALE = characters_mod.MODE_WHALE
 
+# 工具循环的默认最大轮数。
+#
+# 模型可能一直调工具不出结论（"再查一次""再记一条"），所以必须有上限。
+# 撞上限时要**如实说明**，不能假装回答完了——这是和项目其它护栏
+# 一致的取舍：宁可说"没查清楚"，也不编一个结论。
+MAX_TOOL_ROUNDS = 3
+
 # 指令别名：只做精确的整串替换，避免"包含即替换"伤到别的指令。
 # 打字习惯差异（全角、大小写、英文名）都收敛到同一条指令上。
 COMMAND_ALIASES = {
@@ -399,13 +406,13 @@ class Engine:
 
         # 5) 正常对话
         self.record(message, now)
-        self._remember_from_message(message, outcome, now)
         # 图片理解放在检索之前：它是"看见用户发了什么"，
         # 而检索是"去外面查"。把图先看明白，后续即使要检索，
         # 检索词也能更准（而且模型的整段上下文是完整的）。
         self._analyze_inputs(message, outcome)
         if self._maybe_search(message, outcome):
             # 检索话题不明确：已经给出澄清询问，不要再让模型生成回复覆盖它
+            self._remember_from_message(message, outcome, now)
             self.storage.append_message(message.user_id, "assistant", outcome.reply or "",
                                         message.group_id, now)
             consume_rate_limit(self.storage, "rl_user", f"{message.user_id}:{message.scene_id}", now)
@@ -416,10 +423,15 @@ class Engine:
         try:
             reply_text, meta = self.generate_reply(message, mode, outcome)
         except LLMError as exc:
+            self._remember_from_message(message, outcome, now)
             outcome.decision = "error"
             outcome.reason = str(exc)
             outcome.reply = "……爱丽丝这边的信号不太稳定，刚才那句话没能处理好。可以再说一次吗？"
             return outcome
+
+        # **记忆写入放在模型调用之后**，这样才看得到本轮是否调过 remember 工具。
+        # 放在之前会导致两条路径重复写入（详见 _remember_from_message 的说明）。
+        self._remember_from_message(message, outcome, now)
 
         reply_text = self.postprocess(reply_text, message)
         if not reply_text:
@@ -1399,6 +1411,132 @@ class Engine:
         messages.append({"role": "user", "content": current_text or message.text})
         return system, messages, variables
 
+    def _tool_rounds_limit(self) -> int:
+        """工具循环最多跑几轮。可配置，便于测试时收紧。"""
+        try:
+            n = int(getattr(self.config.llm, "max_tool_rounds", MAX_TOOL_ROUNDS) or MAX_TOOL_ROUNDS)
+        except (TypeError, ValueError):
+            n = MAX_TOOL_ROUNDS
+        return max(1, min(n, 6))          # 上限 6：再多对 QQ 对话没有意义
+
+    def _run_tool_loop(self, messages: List[Message], schemas: List[Dict[str, Any]],
+                       reply: Reply, message: IncomingMessage, outcome: Outcome,
+                       debug: Dict[str, Any]) -> Reply:
+        """多轮工具编排：让模型能连续调多个工具，而不是只回灌一次。
+
+        以前的实现只做一次"执行 -> 回灌 -> 再问一次"，而且那次再问
+        外面套着 `except LLMError: pass`——**失败了什么也不说**。
+        现在改成真正的循环：
+
+            模型要工具 -> 执行 -> 以 role=tool 回灌 -> 再问
+                       -> 它可能还要下一个工具 -> ...
+
+        三条约束，都是有意加的：
+
+        **1) 有轮数上限。** 模型可能陷入"一直调工具不出结论"。
+        超出上限时**如实说明**，不能假装回答完了。
+
+        **2) 同一个工具不重复调。** 带不同参数不算重复（比如先查
+        A 的论文再查 B 的）；但完全相同的调用再来一次只会浪费
+        额度和时间，而且往往意味着模型在绕圈。
+
+        **3) 失败不再静默。** 某轮调用模型失败时，把"中途出错"
+        记进 debug，并用已有的结果组织回复，而不是无声无息。
+        """
+        limit = self._tool_rounds_limit()
+        all_results: List[Dict[str, Any]] = []
+        seen_calls = set()
+        rounds = 0
+        loop_error = ""
+        hit_limit = False
+
+        while reply.tool_calls and rounds < limit:
+            rounds += 1
+            followup: List[Message] = list(messages)
+            followup.append({"role": "assistant", "content": reply.text or "",
+                             "tool_calls": reply.tool_calls})
+
+            for call in reply.tool_calls:
+                fn = call.get("function") or {}
+                name = str(fn.get("name") or "").strip()
+                raw_args = fn.get("arguments") or "{}"
+                try:
+                    arguments = (json.loads(raw_args) if isinstance(raw_args, str)
+                                 else dict(raw_args))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    arguments = {}
+
+                # 完全相同的调用不再重复执行，但仍然回灌一条说明，
+                # 让模型知道"这个你已经调过了"，避免它以为是失败而重试。
+                fingerprint = (name, json.dumps(arguments, sort_keys=True,
+                                                ensure_ascii=False))
+                if fingerprint in seen_calls:
+                    result = tools_mod.ToolResult(
+                        name, False, "这个调用刚刚已经执行过了，结果见上一条。")
+                else:
+                    seen_calls.add(fingerprint)
+                    try:
+                        result = self._execute_tool(name, arguments, message, outcome)
+                    except Exception as exc:
+                        # 工具执行本身抛异常不能带崩整轮对话
+                        result = tools_mod.ToolResult(
+                            name, False,
+                            "执行出错：%s: %s" % (type(exc).__name__, str(exc)[:100]))
+                all_results.append({"name": name, "ok": result.ok,
+                                    "message": result.message})
+                followup.append({
+                    "role": "tool",
+                    "tool_call_id": call.get("id", name),
+                    "name": name,
+                    "content": json.dumps({"ok": result.ok, "message": result.message},
+                                          ensure_ascii=False),
+                })
+
+            try:
+                nxt = self.llm.chat(followup, config=self.config.llm,
+                                    tools=schemas or None)
+            except LLMError as exc:
+                # **以前这里是 `except LLMError: pass`**，失败完全无声。
+                loop_error = str(exc)[:160]
+                break
+            if nxt.text:
+                reply = nxt
+            elif nxt.tool_calls:
+                reply = nxt              # 只有工具调用没有文字，继续下一轮
+            else:
+                break                    # 空回复且不再要工具，没得继续
+
+        if reply.tool_calls and rounds >= limit:
+            hit_limit = True
+
+        if all_results:
+            outcome.tool_results = all_results
+
+        # 没有任何文字时兜底。**要区分"做成了"和"没做成"**，
+        # 也要区分"中途出错"——不能一律说"已经处理了"。
+        if not reply.text:
+            if loop_error:
+                reply.text = ("……爱丽丝在处理这件事的中途遇到了一点问题"
+                              "（%s），所以没能给出完整结果。" % loop_error)
+            elif hit_limit:
+                reply.text = "这件事爱丽丝查了几轮还没理清楚，先给你目前的结果吧。"
+            elif all_results:
+                ok_count = sum(1 for t in all_results if t["ok"])
+                reply.text = ("……嗯，这件事爱丽丝已经处理了。" if ok_count
+                              else "这件事爱丽丝现在做不到，需要换一种方式。")
+
+        debug["tool_rounds"] = rounds
+        debug["tool_calls_total"] = len(all_results)
+        debug["tools_used"] = [t["name"] for t in all_results]
+        if hit_limit:
+            debug["tool_round_limit"] = limit
+        if loop_error:
+            debug["tool_loop_error"] = loop_error
+        # 循环结束后模型可能还想调工具（撞上限），这些没执行的不该
+        # 留在 outcome 里让上层以为执行过了。
+        reply.tool_calls = [] if hit_limit else reply.tool_calls
+        return reply
+
     def generate_reply(self, message: IncomingMessage, mode: str, outcome: Outcome) -> tuple:
         system, messages, variables = self.build_messages(message, mode)
 
@@ -1416,39 +1554,9 @@ class Engine:
                               tools=schemas or None)
         debug = {"provider": reply.provider, "model": reply.model, "raw": reply.raw,
                  "tools_offered": debug_tools}
-        tool_results: List[Dict[str, Any]] = []
 
         if reply.tool_calls:
-            followup_messages = list(messages)
-            followup_messages.append({"role": "assistant", "content": reply.text or "",
-                                      "tool_calls": reply.tool_calls})
-            for call in reply.tool_calls:
-                name = ((call.get("function") or {}).get("name") or "").strip()
-                raw_args = (call.get("function") or {}).get("arguments") or "{}"
-                try:
-                    arguments = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
-                except json.JSONDecodeError:
-                    arguments = {}
-                result = self._execute_tool(name, arguments, message, outcome)
-                tool_results.append({"name": name, "ok": result.ok, "message": result.message})
-                followup_messages.append({
-                    "role": "tool",
-                    "tool_call_id": call.get("id", name),
-                    "name": name,
-                    "content": json.dumps({"ok": result.ok, "message": result.message}, ensure_ascii=False),
-                })
-            outcome.tool_results = tool_results
-            try:
-                # 二次生成也要带 tools：模型可能想接着调下一个工具
-                second = self.llm.chat(followup_messages, config=self.config.llm,
-                                       tools=schemas or None)
-                if second.text:
-                    reply = second
-            except LLMError:
-                pass
-            if not reply.text and tool_results:
-                reply.text = "……嗯，这件事爱丽丝已经处理了。" if any(t["ok"] for t in tool_results) \
-                    else "这件事爱丽丝现在做不到，需要换一种方式。"
+            reply = self._run_tool_loop(messages, schemas, reply, message, outcome, debug)
 
         outcome.prompt_system = system
         outcome.messages = messages
@@ -1559,8 +1667,29 @@ class Engine:
             self.storage.set_display_name(message.user_id, message.user_name)
         self.storage.append_message(message.user_id, "user", message.text, message.group_id, now)
 
+    def _remember_tool_already_handled(self, outcome: Outcome) -> bool:
+        """本轮是否已经通过 remember 工具成功写入过记忆。"""
+        for item in (outcome.tool_results or []):
+            if item.get("name") == "remember" and item.get("ok"):
+                return True
+        return False
+
     def _remember_from_message(self, message: IncomingMessage, outcome: Outcome, now: float) -> None:
         if not self.config.memory.enabled or not self.config.memory.explicit_save:
+            return
+        # **模型已经用 remember 工具写过了，启发式就让路。**
+        #
+        # 这个函数是在调用模型**之前**跑的（顺序不能反：模型需要看到
+        # 已保存的记忆），所以它没法提前知道模型会不会调工具。
+        # 两条路径同时写就会出现重复——实测：
+        #
+        #     source='explicit'  "用户明确要求记住：我喜欢猫"   <- 这里写的
+        #     source='tool'      "猫"                        <- 工具写的
+        #
+        # 一个"记住"请求存两条，既浪费额度又让用户看到重复的记忆。
+        # 工具写的是模型**明确表达**要保存的内容，比启发式从原话里
+        # 切出来的更准，所以让工具优先。
+        if self._remember_tool_already_handled(outcome):
             return
         has_request = memory_mod.has_explicit_request(message.text)
         facts = memory_mod.extract(message.text, allow_sensitive=self.config.features.memory_sensitive_data)
