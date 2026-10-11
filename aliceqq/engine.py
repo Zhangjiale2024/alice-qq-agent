@@ -1427,8 +1427,38 @@ class Engine:
                 messages.append({"role": item["role"], "content": item["content"]})
         current_text = message.text.strip() if message.is_private else strip_mention(
             message.text, [self.config.bot.character, self.config.bot.agent_name])
-        messages.append({"role": "user", "content": current_text or message.text})
+        messages.append({"role": "user",
+                         "content": current_text or self._media_placeholder(message)})
         return system, messages, variables
+
+    def _media_placeholder(self, message: IncomingMessage) -> str:
+        """文字为空但带媒体时，给 user 消息一个占位文本。
+
+        **为什么需要这个。** 用户直接甩一张图 / 发一条语音时
+        `message.text` 是空的，原来就原样塞进 `content`，于是发给模型的
+        user 消息是**空字符串**。图片描述虽然在 system 里，但连续几条
+        「空 user 消息」是个退化输入模式——实测（真机 + 本地复现）
+        模型会回"你只发了一个空消息""爱丽丝没收到内容哦"，
+        哪怕描述就在它的 system 里。
+
+        改成给一句固定的占位文本，模型就有具体的东西可以回应，
+        不必靠"注意 system 里那段"。
+
+        注意这里**不描述媒体内容**，只说"发了什么类型"——
+        真正的描述由 `_vision_block` / `_transcript_block` / `_video_block`
+        注入 system，那是唯一的信息来源，不能让两处都描述内容
+        （否则模型可能把占位文本当成描述来编）。
+        """
+        kinds = []
+        if message.has_images:
+            kinds.append("%d 张图片" % len(message.images))
+        if message.has_audios:
+            kinds.append("%d 条语音" % len(message.audios))
+        if message.has_videos:
+            kinds.append("%d 段视频" % len(message.videos))
+        if not kinds:
+            return ""
+        return "（用户发来了%s，但没有打字。请根据上面的识别结果回应。）" % "、".join(kinds)
 
     def _tool_rounds_limit(self) -> int:
         """工具循环最多跑几轮。可配置，便于测试时收紧。"""
