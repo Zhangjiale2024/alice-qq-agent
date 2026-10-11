@@ -307,6 +307,17 @@ if HAS_NONEBOT:  # pragma: no cover
             _debug_log(f"_extract_audios 失败，本轮按『没有语音』处理：{exc}")
             return []
 
+    def _extract_videos(event: MessageEvent) -> list:
+        """转发到 media_input.segments_to_videos。理由同 _extract_images。
+
+        视频段以前也是完全丢弃的——项目根本不认 `video`。
+        """
+        try:
+            return media_input_mod.segments_to_videos(event.get_message(), _debug_log)
+        except Exception as exc:
+            _debug_log(f"_extract_videos 失败，本轮按『没有视频』处理：{exc}")
+            return []
+
     async def _record_admin(bot: Bot, event: MessageEvent, group_id: str) -> None:
         """把群主/管理员记进群配置，供权限判断使用。
 
@@ -594,6 +605,7 @@ if HAS_NONEBOT:  # pragma: no cover
         # （用户直接甩一张图不说话），那种消息以前会被当成空消息跳过。
         images = _extract_images(event)
         audios = _extract_audios(event)
+        videos = _extract_videos(event)
 
         incoming = IncomingMessage(
             user_id=str(event.user_id),
@@ -608,6 +620,7 @@ if HAS_NONEBOT:  # pragma: no cover
             timestamp=float(getattr(event, "time", time.time())),
             images=images,
             audios=audios,
+            videos=videos,
         )
 
         if _debug:

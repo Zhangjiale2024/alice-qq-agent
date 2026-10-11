@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import Any, Callable, Iterable, List, Optional
 
 from . import asr as asr_mod
+from . import video as video_mod
 from . import vision
 
 
@@ -62,6 +63,43 @@ def segments_to_images(segments: Iterable[Any],
         return []
     if refs and debug:
         debug("本次收到 %d 张图片" % len(refs))
+    return refs
+
+
+def segments_to_videos(segments: Iterable[Any],
+                       debug: Optional[Callable[[str], None]] = None) -> List[Any]:
+    """把 video 段抽成 `video.VideoRef` 列表。
+
+    QQ 的 video 段给的字段和其他段类似（`url` / `file`），
+    另外通常带 `duration`。有的客户端还会给一个 `thumb`（封面图），
+    这里**不用它**——抽帧能拿到更真实的画面，而且封面常常是无关的网图。
+    """
+    refs: List[Any] = []
+    try:
+        for segment in segments:
+            if _text(getattr(segment, "type", "")) != "video":
+                continue
+            data = dict(getattr(segment, "data", {}) or {})
+            url = _text(data.get("url"))
+            path = _text(data.get("file"))
+            if not url and not path:
+                continue
+            try:
+                duration = float(data.get("duration") or 0)
+            except (TypeError, ValueError):
+                duration = 0.0
+            raw_name = (path or "video.mp4").rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+            refs.append(video_mod.VideoRef(
+                url=url, path=path, duration=duration,
+                filename=raw_name[:40] or "video.mp4",
+                source_hint=(path or url)[:80]))
+    except Exception as exc:
+        if debug:
+            debug("segments_to_videos 解析失败，本次按『没有视频』处理："
+                  "%s: %s" % (type(exc).__name__, exc))
+        return []
+    if refs and debug:
+        debug("本次收到 %d 段视频" % len(refs))
     return refs
 
 

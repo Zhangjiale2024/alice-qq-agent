@@ -207,3 +207,111 @@ def probe_duration(data: bytes, ffmpeg: str = "",
         return int(hours) * 3600 + int(minutes) * 60 + float(seconds), ""
     except ValueError:
         return 0.0, "解析不出音频时长"
+
+
+# ---------------------------------------------------------------------------
+# 视频
+# ---------------------------------------------------------------------------
+
+def _with_temp_file(data: bytes, suffix: str):
+    """把字节落到临时文件，返回 (路径, 错误说明)。
+
+    **视频不能用管道喂给 ffmpeg**（和 probe_duration 里记的是同一个原因）：
+    mp4 的 moov box 可能在文件尾部，需要可 seek 才能解析；
+    从管道读会得到"moov atom not found"或者直接解不出流。
+    """
+    if not data:
+        return "", "视频内容为空"
+    handle = None
+    try:
+        handle = tempfile.NamedTemporaryFile(prefix="alice_video_", suffix=suffix,
+                                             delete=False)
+        handle.write(data)
+        handle.flush()
+        handle.close()
+        return handle.name, ""
+    except OSError as exc:
+        if handle is not None:
+            try:
+                os.unlink(handle.name)
+            except OSError:
+                pass
+        return "", f"无法写临时文件：{type(exc).__name__}"
+
+
+def extract_video_audio(data: bytes, ffmpeg: str = "", sample_rate: int = 16000,
+                        start: float = 0.0, duration: float = 0.0,
+                        timeout: int = DEFAULT_TIMEOUT) -> Tuple[Optional[bytes], str]:
+    """抽出视频的音轨，输出 16kHz 单声道 WAV。
+
+    很多视频**没有音轨**（纯画面）。这种情况 ffmpeg 会因为没有输出流而
+    返回非零，这里把它当成"没有音频"而不是错误——调用方据此只做画面理解。
+    """
+    if not ffmpeg:
+        return None, "没有可用的 ffmpeg"
+    path, err = _with_temp_file(data, ".mp4")
+    if err:
+        return None, err
+    args = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin"]
+    if start > 0:
+        args += ["-ss", "%.3f" % float(start)]
+    if duration > 0:
+        args += ["-t", "%.3f" % float(duration)]
+    args += ["-i", path, "-vn", "-ac", "1", "-ar", str(int(sample_rate)),
+             "-f", "wav", "pipe:1"]
+    try:
+        out, run_err = run(args, timeout=timeout)
+        if run_err:
+            # 没有音轨是最常见的原因，单独说明，别让调用方以为"坏了"
+            return None, "视频没有音轨或音轨无法解码"
+        return out, ""
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def extract_video_frames(data: bytes, ffmpeg: str = "", count: int = 3,
+                         width: int = 640, start: float = 0.0,
+                         duration: float = 0.0, quality: int = 4,
+                         timeout: int = DEFAULT_TIMEOUT) -> Tuple[List[bytes], str]:
+    """从视频里均匀抽 `count` 帧，返回 JPEG 字节列表。
+
+    **为什么压缩到 width 宽**：视觉接口按图算钱，一张 1080p JPEG 可能
+    好几 MB，base64 之后还要涨 1/3。等比例缩到 640 宽之后每帧通常
+    几十 KB，画面内容对"看懂发生了什么"完全够用。
+
+    为什么要抽多帧而不是一张：短视频里画面变化很快
+    （"谁在做什么"往往看不出来），多抽几帧成本增加有限。
+    """
+    if not ffmpeg:
+        return [], "没有可用的 ffmpeg"
+    if count <= 0:
+        return [], ""
+    path, err = _with_temp_file(data, ".mp4")
+    if err:
+        return [], err
+    try:
+        frames: List[bytes] = []
+        seek = max(0.0, float(start)) + 0.1     # 避开可能的黑场首帧
+        step = (float(duration) / (count + 1)) if duration and duration > 0 else 1.0
+        for i in range(count):
+            args = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
+                    "-ss", "%.3f" % (seek + step * i),
+                    "-i", path,
+                    "-frames:v", "1",
+                    "-vf", "scale=%d:-2" % int(width),
+                    "-q:v", str(int(quality)),
+                    "-f", "image2", "-c:v", "mjpeg", "pipe:1"]
+            out, _ = run(args, timeout=timeout)
+            if out:
+                frames.append(out)
+        if not frames:
+            return [], "抽不出画面帧（可能不是有效视频）"
+        return frames, ""
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass

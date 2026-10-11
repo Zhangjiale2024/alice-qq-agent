@@ -5,10 +5,10 @@
 它可以理解用户发来的图片，根据消息决定是否调用工具，查询最新信息，
 保存用户主动要求记住的内容，也会在操作失败时直接说明失败原因。
 
-目前有 824 项离线测试。核心逻辑约 15,000 行，不依赖第三方 Python 包。
+目前有 863 项离线测试。核心逻辑约 15,000 行，不依赖第三方 Python 包。
 
 <p>
-<img alt="tests" src="https://img.shields.io/badge/tests-824%20passing-brightgreen">
+<img alt="tests" src="https://img.shields.io/badge/tests-863%20passing-brightgreen">
 <img alt="deps" src="https://img.shields.io/badge/core%20deps-none-blue">
 <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-blue">
 <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
@@ -153,6 +153,46 @@ VISION_MODEL=qwen3-vl-plus
 ③         将工具结果回灌给模型
 记忆落库  2 条
 ```
+
+## 视频理解
+
+用户发来的视频会被拆成**画面**和**声音**两部分，分别交给已有的两条链路：
+
+```text
+视频 --抽帧--> JPEG --+--> 视觉模型（图片理解那条）
+     --抽音轨--> WAV --+--> ASR（语音理解那条）
+```
+
+这样做的好处是视频**不需要新的模型、新的额度、新的护栏**——
+图片和语音那两套门禁与"看不到就说看不到"的护栏自动生效。
+
+实测一段 3 秒的视频（深蓝底 + 白字 + 音轨说话）：
+
+```text
+debug.video = {ok: True, frames: 3, frames_ok: True,
+               has_audio: True, transcript_chars: 10, elapsed: 11.53}
+
+注入提示词
+  【画面】纯深蓝色背景，左下角有一行白色文字："ALICE VIDEO 5570"
+  【声音】音轨转写：這是愛麗絲的測試視頻
+
+模型回复
+  "爱丽丝看到了！从机器抽出来的几帧画面看——
+   画面部分：纯深蓝色背景，左下角有一行白色文字「ALICE VIDEO 5570」…
+   声音部分：音轨转写出来是「這是愛麗絲的測試視頻」。"
+```
+
+模型**主动区分了两个来源**，没有假装自己看过整段视频——
+提示词里明确要求了这一点，因为"我没看过全片"这件事
+它自己不会知道。
+
+几个边界情况都当成一等情况处理：
+
+- **没有音轨不是错误。** 纯画面视频很常见，抽帧照样能用。
+- **抽不出帧但有声音仍然算成功。** "有人说话"值得听。
+- **长视频只转写前 120 秒。** 又慢又贵，而且开场通常已含主要信息。
+- **抽帧缩到 640 宽。** 视觉接口按图算钱，1080p 一帧好几 MB，
+  缩完通常几十 KB，对"看懂发生了什么"完全够用。
 
 ## 多轮工具编排
 

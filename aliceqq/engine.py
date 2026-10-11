@@ -21,6 +21,8 @@ from . import moderation as moderation_mod
 from . import prompt as prompt_mod
 from . import asr as asr_mod
 from . import tools as tools_mod
+from . import ffmpeg as ffmpeg_mod
+from . import video as video_mod
 from . import vision as vision_mod
 from .config import AppConfig, GroupSettings
 from . import db as db_mod
@@ -112,6 +114,11 @@ class IncomingMessage:
     # 用户直接发来的语音消息一次都没有被识别过。
     # 同样写 Any 以免 engine 依赖 asr 模块的具体类型（实际是 asr.AudioRef）。
     audios: List[Any] = field(default_factory=list)
+    # 用户这次发来的视频。
+    #
+    # 视频走的是**已有的两条链路**：抽帧交给视觉模型，抽音轨交给 ASR。
+    # 所以它不需要新的额度类型——vision 和 asr_voice 的门禁自动生效。
+    videos: List[Any] = field(default_factory=list)
 
     @property
     def has_images(self) -> bool:
@@ -122,8 +129,12 @@ class IncomingMessage:
         return bool(self.audios)
 
     @property
+    def has_videos(self) -> bool:
+        return bool(self.videos)
+
+    @property
     def has_media_input(self) -> bool:
-        return bool(self.images or self.audios)
+        return bool(self.images or self.audios or self.videos)
 
     @property
     def scene_id(self) -> str:
@@ -238,6 +249,12 @@ class Engine:
         # 本轮语音转写的结果。同样每轮清一次：
         # 把 A 的语音转写带进 B 的对话，等于泄漏他说过的话。
         self._pending_transcript: Optional[asr_mod.Transcription] = None
+        # 本轮视频解析结果。视频会同时用到视觉和语音两条链路，
+        # 所以这里要分别存画面结果和音轨转写。
+        self._pending_video = None
+        self._pending_video_frames = None
+        self._pending_video_transcript = ""
+        self._pending_video_transcript_note = ""
 
         # V2：联网检索。构建失败也没关系——工具会如实显示为不可用，
         # 引擎不会假装搜过（诚实护栏负责兜底）。
@@ -1384,6 +1401,8 @@ class Engine:
             "vision_result": self._vision_block(message),
             # 用户这次发的语音转写。和图片同理：听不到也要说。
             "transcript": self._transcript_block(message),
+            # 用户这次发的视频（画面抽帧 + 音轨转写）。
+            "video_result": self._video_block(message),
             "search_results": self._search_block(message, mode),
             "event_type": "private_message" if message.is_private else "group_message",
             "agent_name": self.config.bot.agent_name,
@@ -1979,6 +1998,10 @@ class Engine:
         当成用户原话交给模型。
         """
         self._pending_transcript = None
+        self._pending_video = None
+        self._pending_video_frames = None
+        self._pending_video_transcript = ""
+        self._pending_video_transcript_note = ""
         if not message.has_audios:
             return
 
@@ -2053,14 +2076,135 @@ class Engine:
             return head + "\n" + body + "\n注意：" + warning
         return head + "\n" + body
 
-    def _analyze_inputs(self, message: IncomingMessage, outcome: Outcome) -> None:
-        """本轮的**多模态输入**统一入口：先看图，再看语音。
+    def _analyze_video(self, message: IncomingMessage, outcome: Outcome) -> None:
+        """把用户发来的视频拆成画面与声音，分别交给视觉和 ASR。
 
-        收敛成一个入口是为了以后加视频之类的输入时，
-        不用在多处改调用点（`handle` 里只认这一个方法）。
+        **视频不需要新的模型额度**：抽出来的帧走 `vision`，
+        音轨转写走 `asr_voice`，两条链路各自的门禁与额度自动生效，
+        护栏（"看不到就说看不到"）也自动继承。
+
+        三个失败点要分开报，因为它们对用户的意义不同：
+          * 抽不出帧 -> 这段视频的画面没法看
+          * 没有音轨 -> 正常情况（纯画面视频），不是错误
+          * 转写失败 -> 有声音但没听清
+        """
+        self._pending_video = None
+        self._pending_video_frames = None
+        self._pending_video_transcript = ""
+        self._pending_video_transcript_note = ""
+        if not message.has_videos:
+            return
+
+        videos = list(message.videos)
+        outcome.debug["videos_received"] = len(videos)
+        ref = videos[0]                       # 一条消息里的视频只认第一条
+        data = ref.read_bytes() if hasattr(ref, "read_bytes") else b""
+        if not data:
+            self._pending_video = video_mod.VideoAnalysis(
+                False, error="视频读取失败或超过体积上限")
+            outcome.debug["video"] = {"ok": False, "reason": "读取失败"}
+            return
+
+        exe = ""
+        try:
+            exe = ffmpeg_mod.find_ffmpeg(self.config)
+        except Exception:
+            exe = ""
+        if not exe:
+            self._pending_video = video_mod.VideoAnalysis(
+                False, error="没有可用的 ffmpeg，无法解析视频")
+            outcome.debug["video"] = {"ok": False, "reason": "没有 ffmpeg"}
+            return
+
+        started = time.time()
+        try:
+            analysis = video_mod.analyze(
+                data, exe,
+                frame_count=int(getattr(self.config.vision, "video_frames", 3) or 3),
+                duration_hint=float(getattr(ref, "duration", 0.0) or 0.0))
+        except Exception as exc:
+            analysis = video_mod.VideoAnalysis(
+                False, error="%s: %s" % (type(exc).__name__, str(exc)[:120]))
+        self._pending_video = analysis
+
+        # 画面：复用图片理解那条链路。它有自己的额度与"看不到就说"的护栏，
+        # 所以这里不重复判断，直接调即可（build 出来的 ImageRef 走同一条路）。
+        frame_result = None
+        if analysis.frames and self.vision_client is not None:
+            if self._feature_allowed(message, "vision"):
+                try:
+                    frame_result = self.vision_client.describe(
+                        [vision_mod.ImageRef(blob=f, kind="image")
+                         for f in analysis.frames])
+                except Exception as exc:
+                    frame_result = vision_mod.VisionResult(
+                        False, error="%s: %s" % (type(exc).__name__, str(exc)[:120]))
+                self._pending_video_frames = frame_result
+                if frame_result.ok:
+                    consume_feature_quota(self.storage, self.config, "vision",
+                                          message.user_id, message.group_id,
+                                          message.is_private)
+            else:
+                self._pending_video_frames = vision_mod.VisionResult(
+                    False, error=self._last_block_reason or "不允许使用图片理解")
+        elif analysis.frames:
+            self._pending_video_frames = vision_mod.VisionResult(
+                False, error="没有配置视觉模型")
+
+        # 声音：复用语音那条链路
+        if analysis.audio:
+            if self.asr_client is not None and getattr(self.asr_client, "available", False):
+                if self._feature_allowed(message, "asr_voice"):
+                    try:
+                        tr = self.asr_client.transcribe(analysis.audio, "video_audio.wav")
+                    except Exception as exc:
+                        tr = asr_mod.Transcription(
+                            False, error="%s: %s" % (type(exc).__name__, str(exc)[:120]))
+                    if tr.ok and (tr.text or "").strip():
+                        self._pending_video_transcript = tr.text.strip()
+                        self._pending_video_transcript_note = asr_mod.quality_warning(
+                            tr.text, seconds=tr.seconds, avg_logprob=tr.avg_logprob,
+                            no_speech_prob=tr.no_speech_prob)
+                        consume_feature_quota(self.storage, self.config, "asr_voice",
+                                              message.user_id, message.group_id,
+                                              message.is_private)
+                else:
+                    self._pending_video_transcript_note = (
+                        self._last_block_reason or "不允许识别语音")
+
+        outcome.debug["video"] = {
+            "ok": analysis.ok,
+            "frames": len(analysis.frames),
+            "frames_ok": bool(getattr(self._pending_video_frames, "ok", False)),
+            "has_audio": analysis.has_audio,
+            "transcript_chars": len(self._pending_video_transcript),
+            "elapsed": round(time.time() - started, 2),
+            "error": analysis.error,
+            "note": analysis.note,
+        }
+
+    def _video_block(self, message: IncomingMessage) -> str:
+        """给提示词用的视频区块。没有视频就返回空串。"""
+        if not message.has_videos:
+            return ""
+        analysis = getattr(self, "_pending_video", None)
+        if analysis is None:
+            return ("（用户发了视频，但这次没有拿到解析结果。）")
+        return video_mod.render_for_model(
+            analysis,
+            frame_result=getattr(self, "_pending_video_frames", None),
+            transcript=getattr(self, "_pending_video_transcript", ""),
+            transcript_note=getattr(self, "_pending_video_transcript_note", ""))
+
+    def _analyze_inputs(self, message: IncomingMessage, outcome: Outcome) -> None:
+        """本轮的**多模态输入**统一入口：图片、语音、视频。
+
+        收敛成一个入口是为了加新模态时不用在多处改调用点——
+        这轮加视频就只动了这里和 `handle` 里的一行。
         """
         self._analyze_images(message, outcome)
         self._analyze_audio(message, outcome)
+        self._analyze_video(message, outcome)
 
     def _maybe_search(self, message: IncomingMessage, outcome: Outcome) -> bool:
         """时效性问题先检索，把结果作为上下文注入。

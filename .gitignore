@@ -5,6 +5,16 @@ __pycache__/
 .venv/
 venv/
 env/
+# 虚拟环境的**变体**也要挡住。
+#
+# 实测踩过：某次 PowerShell 里引号写错，建出了一个叫 `venv‘` 的目录
+# （末尾是 U+2018 左单引号）。它是个完整的 venv、22 MB、1497 个文件，
+# 而上面的 `venv/` **匹配不到它**——`git check-ignore` 返回空，
+# 也就是说它随时可能被 `git add -A` 一起提交进去。
+# 所以用通配兜住所有 venv* 变体。
+venv*/
+.venv*/
+virtualenv*/
 
 # ---- 凭据：**绝不能提交** ----
 # .env 里有真实的 LLM_API_KEY / BOCHA_API_KEY / BILIBILI_SESSDATA。
