@@ -7,10 +7,12 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import time
 import uuid
 import unittest
+from urllib.parse import unquote, urlparse
 from unittest import mock
 
 from aliceqq import proactive as proactive_mod
@@ -126,16 +128,35 @@ class MediaCQTest(unittest.TestCase):
         try:
             library = MediaLibrary(root)
             item = library.add("sticker", "a.png", PNG, tags="困", desc="困")
+            real = str(library.path_of(item))
             outcome = type("O", (), {})()
-            outcome.media = [MediaAttachment(kind="sticker",
-                                             path=str(library.path_of(item)))]
+            outcome.media = [MediaAttachment(kind="sticker", path=real)]
             cq = cq_code_for(outcome)
             self.assertIn("[CQ:image,file=", cq)
-            body = cq.split("file=", 1)[1].rstrip("]").replace("%2C", ",")
-            self.assertTrue(body.startswith("file:///"), body)
-            local = body[len("file:///"):]
-            self.assertTrue(os.path.isabs(local),
-                            f"CQ 里的路径必须是绝对路径，实际：{body}")
+
+            # **用 URL 解析来验证，不要手工剥前缀。**
+            # 第一版是 `body[len("file:///"):]` 然后 assertTrue(os.path.isabs(...))：
+            # 在 Unix 上剥掉三斜杠后剩下 `home/runner/...`（没有前导斜杠），
+            # os.path.isabs 返回 False，测试就红了——**报的是"CQ 路径不是
+            # 绝对路径"，看起来像生产 bug，其实是测试的检查方式不对**。
+            # 正确做法是把 URI 解析回路径再和原路径比。
+            body = cq.split("file=", 1)[1].rstrip("]")
+            body = body.replace("%2C", ",").replace("%5B", "[").replace("%5D", "]")
+            parsed = urlparse(body)
+            self.assertEqual(parsed.scheme, "file", body)
+            # 空 netloc 才说明"没有主机名"——这正是注释里担心的那个坑
+            self.assertEqual(parsed.netloc, "",
+                             f"URI 里出现了主机名，NapCat 会找不到文件：{body}")
+            # 解析回来的路径必须和原路径指向同一个文件。
+            # Windows 上 file URI 的形式是 `/D:/x/y`，比原生路径多一个
+            # 前导斜杠（那是 URI 路径的根，不是路径的一部分），
+            # 比较前要按平台去掉。
+            recovered = unquote(parsed.path)
+            if os.name == "nt" and re.match(r"^/[A-Za-z]:", recovered):
+                recovered = recovered[1:]
+            self.assertEqual(os.path.normcase(os.path.normpath(recovered)),
+                             os.path.normcase(os.path.normpath(real)),
+                             f"CQ 里的路径回不来：{body}")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

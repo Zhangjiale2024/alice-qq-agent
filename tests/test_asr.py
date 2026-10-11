@@ -345,6 +345,28 @@ class SessdataInjectorTest(unittest.TestCase):
 
 
 class AudioTest(unittest.TestCase):
+    # ------------------------------------------------------------------
+    # ffmpeg 必须被打桩，否则这些用例偷偷依赖"跑测试的机器上装了 ffmpeg"
+    #
+    # 实测踩过（CI 四个 job 全红）：这些用例传的是
+    # `asr_ffmpeg="C:\\fake\\ffmpeg.exe"`，一个 **Windows 路径**。
+    # 而 `_transcribe_plan` 里是 `find_ffmpeg(explicit=self.asr_ffmpeg)`，
+    # 它只认**确实存在**的文件——那个路径当然不存在，于是回退去自动找
+    # ffmpeg：本机的 GPT-SoVITS venv 里带了 imageio-ffmpeg，所以找得到、
+    # 用例通过；CI 上找不到，`_transcribe_plan` 就返回 `skip` 而不是
+    # `segmented`，报的是 `AssertionError: 'skip' != 'segmented'`。
+    #
+    # **测试里传一个假路径并不等于打桩**——只要被测代码会去检查它的
+    # 真实性，那就还是依赖环境。所以这里直接在模块层面打桩。
+    # ------------------------------------------------------------------
+    FFMPEG = "/fake/ffmpeg-for-tests"
+
+    def setUp(self):
+        patcher = mock.patch("aliceqq.search.find_ffmpeg",
+                             return_value=self.FFMPEG)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _provider(self, **kwargs):
         provider = BilibiliProvider(timeout=5, **kwargs)
         provider._warmed = True
