@@ -141,6 +141,84 @@ def print_trace(outcome, config=None) -> None:
         a = debug["academic"]
         print(f"  学术      provider={a.get('provider')} ok={a.get('ok')} "
               f"条数={a.get('count')}")
+
+    # ---- 多模态输入 ----
+    #
+    # 这一段以前是缺的：引擎一直在 debug 里写图片/语音/视频的处理结果，
+    # 但 trace 不打印它们。于是"它到底看没看到我发的图"完全看不出来，
+    # 而多模态恰恰是最容易静默失效的地方——最近两轮各抓到一类
+    # （纯媒体消息被当空消息丢掉、base64 图片读不出来），两次都是
+    # **没有任何报错**，只能靠这种可观测性发现。
+    #
+    # 原则和别处一致：只打印真实发生过的事。
+    # 用户没发图就不打图片那一行，绝不编造一个阶段出来。
+    vision_info = debug.get("vision")
+    if vision_info or debug.get("images_received"):
+        count = (vision_info or {}).get("images") or debug.get("images_received") or 0
+        if vision_info is None:
+            print(f"  图片     收到 {count} 张，但没有处理记录")
+        elif vision_info.get("ok"):
+            extra = f" 少看 {vision_info['skipped']} 张" if vision_info.get("skipped") else ""
+            print(f"  图片     收到 {count} 张，识别成功"
+                  f"（模型={vision_info.get('model') or '?'} "
+                  f"耗时={vision_info.get('elapsed')}s{extra}）")
+        else:
+            # 失败原因必须打出来——"看不见"和"看错了"是两件事，
+            # 处理方式也不同（前者要提示用户，后者要调提示词）
+            why = vision_info.get("reason") or vision_info.get("error") or "未知"
+            blocked = "（被门禁拦下）" if vision_info.get("blocked") else ""
+            print(f"  图片     收到 {count} 张，**没有看到内容**{blocked}：{why}")
+
+    asr_info = debug.get("asr")
+    if asr_info or debug.get("audios_received"):
+        count = (asr_info or {}).get("audios") or debug.get("audios_received") or 0
+        if asr_info is None:
+            print(f"  语音     收到 {count} 条，但没有处理记录")
+        elif asr_info.get("ok"):
+            print(f"  语音     收到 {count} 条，转写 {asr_info.get('chars')} 字"
+                  f"（{asr_info.get('seconds')}s 音频 耗时 {asr_info.get('elapsed')}s）")
+        else:
+            why = asr_info.get("reason") or asr_info.get("error") or "未知"
+            blocked = "（被门禁拦下）" if asr_info.get("blocked") else ""
+            print(f"  语音     收到 {count} 条，**没有听清**{blocked}：{why}")
+
+    video_info = debug.get("video")
+    if video_info or debug.get("videos_received"):
+        count = debug.get("videos_received") or 1
+        if video_info is None:
+            print(f"  视频     收到 {count} 段，但没有处理记录")
+        else:
+            # 视频最容易被误认为"看过全片"，所以把两个来源分开写
+            frames = video_info.get("frames") or 0
+            frames_ok = video_info.get("frames_ok")
+            audio_ok = video_info.get("has_audio")
+            chars = video_info.get("transcript_chars") or 0
+            if video_info.get("ok"):
+                print(f"  视频     收到 {count} 段，抽到 {frames} 帧"
+                      f"（识别{'成功' if frames_ok else '未成功'}）"
+                      f"；音轨{'有' if audio_ok else '无'}"
+                      f"（转写 {chars} 字）耗时 {video_info.get('elapsed')}s")
+            else:
+                why = video_info.get("error") or video_info.get("reason") or "未知"
+                print(f"  视频     收到 {count} 段，**没有拿到内容**：{why}")
+
+    if debug.get("empty_text_with_media"):
+        # 单独打出来，因为它是实测踩过的一个 bug 的痕迹：
+        # 纯媒体消息文字为空，早期被当成"空消息"直接丢掉，
+        # 于是图片理解和语音识别一次都没执行。
+        print("  说明     本条消息没有文字，只有媒体")
+
+    # ---- 工具循环 ----
+    rounds = debug.get("tool_rounds")
+    if rounds:
+        line = f"  工具循环  跑了 {rounds} 轮，共 {debug.get('tool_calls_total', 0)} 次调用"
+        if debug.get("tool_round_limit"):
+            line += f"（撞上限 {debug['tool_round_limit']}，可能没查完）"
+        print(line)
+    if debug.get("tool_loop_error"):
+        # 以前这里套着 `except LLMError: pass`，失败完全无声
+        print(f"  循环出错  {debug['tool_loop_error']}")
+
     if getattr(outcome, "memory_saved", None):
         print(f"  记忆落库  {len(outcome.memory_saved)} 条")
     if getattr(outcome, "memory_rejected", None):

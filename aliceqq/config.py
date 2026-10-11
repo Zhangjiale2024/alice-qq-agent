@@ -323,6 +323,13 @@ class VisionConfig:
     max_tokens: int = 400
     # 一次最多看几张。群聊里连发多图很常见，不设上限成本会翻倍。
     max_images_per_turn: int = 3
+    # 视频抽几帧。
+    #
+    # **这个字段以前不存在，而 engine 已经在 getattr 它**——
+    # `getattr(self.config.vision, "video_frames", 3)` 永远拿到默认值 3，
+    # 也就是说"调抽帧数量"这件事根本调不动（死代码）。
+    # 抽得越多越贵（视觉按图计费），但短视频画面变化快，1 帧常常看不出在做什么。
+    video_frames: int = 3
     # 是否把"这一次看不到图"如实告诉模型（关掉的话它会瞎猜）
     tell_model_when_unavailable: bool = True
 
@@ -997,6 +1004,8 @@ class AppConfig:
             max_tokens=_as_int(_pick(merged, "VISION_MAX_TOKENS", "vision_max_tokens"), 400),
             max_images_per_turn=_as_int(
                 _pick(merged, "VISION_MAX_IMAGES", "vision_max_images"), 3),
+            video_frames=_as_int(
+                _pick(merged, "VISION_VIDEO_FRAMES", "vision_video_frames"), 3),
             tell_model_when_unavailable=_as_bool(
                 _pick(merged, "VISION_TELL_WHEN_UNAVAILABLE",
                       "vision_tell_when_unavailable"), True),

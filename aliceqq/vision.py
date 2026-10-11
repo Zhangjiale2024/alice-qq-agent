@@ -162,12 +162,20 @@ class VisionClient:
     """
 
     def __init__(self, base_url: str, api_key: str, model: str,
-                 timeout: int = 60, max_tokens: int = 400):
+                 timeout: int = 60, max_tokens: int = 400,
+                 max_images: int = MAX_IMAGES_PER_TURN):
         self.base_url = (base_url or "").rstrip("/")
         self.api_key = api_key or ""
         self.model = model or ""
         self.timeout = timeout
         self.max_tokens = max_tokens
+        # 一次最多看几张。**必须来自配置**——模块常量只是兜底默认值。
+        # 第一版这里没有这个参数，`describe` 直接用模块常量，
+        # 于是 `VisionConfig.max_images_per_turn` 配了也没用（死字段）。
+        try:
+            self.max_images = max(1, int(max_images or MAX_IMAGES_PER_TURN))
+        except (TypeError, ValueError):
+            self.max_images = MAX_IMAGES_PER_TURN
 
     @property
     def configured(self) -> bool:
@@ -188,7 +196,7 @@ class VisionClient:
             return VisionResult(False, error="没有图片")
 
         usable: List[str] = []
-        for item in images[:MAX_IMAGES_PER_TURN]:
+        for item in images[:self.max_images]:
             uri = item.to_url_or_uri()
             if uri:
                 usable.append(uri)
@@ -239,7 +247,7 @@ class VisionClient:
         skipped = max(0, len(images) - len(usable))
         note = ""
         if skipped:
-            note = "（一次最多看 %d 张，后面 %d 张没看）" % (MAX_IMAGES_PER_TURN, skipped)
+            note = "（一次最多看 %d 张，后面 %d 张没看）" % (self.max_images, skipped)
         return VisionResult(True, description=text, provider="openai-compatible",
                             model=self.model, images_seen=len(usable),
                             elapsed=time.time() - started, skipped=skipped, note=note)
@@ -264,7 +272,10 @@ def build_client(config) -> Optional[VisionClient]:
     model = getattr(config, "model", "") or ""
     client = VisionClient(base, key, model,
                           timeout=int(getattr(config, "timeout", 60) or 60),
-                          max_tokens=int(getattr(config, "max_tokens", 400) or 400))
+                          max_tokens=int(getattr(config, "max_tokens", 400) or 400),
+                          max_images=int(getattr(config, "max_images_per_turn",
+                                                 MAX_IMAGES_PER_TURN)
+                                         or MAX_IMAGES_PER_TURN))
     return client if client.configured else None
 
 
