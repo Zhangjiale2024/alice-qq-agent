@@ -220,25 +220,39 @@ def check_docs_consistency(rep: Report) -> None:
                                                      errors="ignore"))
                     except OSError:
                         pass
-    # README 用约数（"NNNNN 多行"）时只查数量级；写精确值时要求完全一致
-    approx = re.search(r"(\d{3,6})\s*多行", text)
-    exact = re.search(r"核心逻辑\s*(\d{4,6})\s*行", text)
-    if approx:
-        claimed = int(approx.group(1))
-        if abs(claimed - lines) <= 1000:
-            rep.add(PASS, f"README 的代码行数「{claimed} 多行」与实际 {lines} 相符")
-        else:
-            rep.add(WARN, f"README 写「{claimed} 多行」，实际 {lines} 行",
-                    "差得有点多，更新一下 README")
-    elif exact:
-        claimed = int(exact.group(1))
-        if claimed == lines:
+    # README 用约数（"14400 多行"）或带千分位（"14,400 行"）时只查数量级；
+    # 写精确值时要求完全一致。
+    #
+    # 第一版只会匹配 `核心逻辑 NNNNN 多行` 这一种写法，而实际 README 里
+    # 写的是「核心逻辑约 14,400 行」——带"约"和千分位逗号，直接匹配不到，
+    # 于是这条检查**静默失效**了。检查本身失效比没有检查更糟。
+    raw = text.replace(",", "").replace("，", "")
+    m = re.search(r"核心逻辑[^0-9]{0,8}(\d{4,6})\s*(多)?\s*行", raw)
+    if m:
+        claimed = int(m.group(1))
+        # 判是不是约数：写法有"14,400 多行"和"约 14,400 行"。
+        # **要在整段匹配文本里找"约"**，不能用 m.start() 往前取——
+        # m.start() 指向的是"核心逻辑"的开头，往前取当然取不到"约"
+        # （它在数字和"核心逻辑"之间）。第一版和第二版都在这里错了，
+        # 结果把带"约"的判成精确值，差 6 行就报错。
+        seg = m.group(0)
+        is_approx = bool(m.group(2)) or ("约" in seg) or ("大概" in seg)
+        if is_approx:
+            if abs(claimed - lines) <= 1000:
+                rep.add(PASS, f"README 的代码行数（约 {claimed}）与实际 {lines} 相符")
+            else:
+                rep.add(WARN, f"README 写「约 {claimed} 行」，实际 {lines} 行",
+                        "差得有点多，更新一下 README")
+        elif claimed == lines:
             rep.add(PASS, f"README 的代码行数 {claimed} 与实际一致")
         else:
             rep.add(FAIL, "README 的代码行数与实际不符",
                     f"README 写 {claimed}，实际 {lines}\n"
-                    f"    建议改成约数「{lines // 1000}000 多行」，"
+                    f"    建议写成约数（如「约 {lines // 1000}000 行」），"
                     f"免得每次改代码都要同步这个数字")
+    else:
+        rep.add(WARN, "没能从 README 里解析出代码行数，这条检查没生效",
+                "检查本身失效比没有检查更糟，请确认 README 里的写法")
 
     # 过期的版本名/功能声明
     stale = []
