@@ -192,16 +192,53 @@ def check_docs_consistency(rep: Report) -> None:
                 src = open(os.path.join(tests_dir, name), encoding="utf-8",
                            errors="ignore").read()
                 actual += len(re.findall(r"^\s+def test_", src, re.M))
-    mentioned = [int(n) for n in re.findall(r"\*\*(\d{2,4})\s*项", text)]
+    # 只看"NNN 项"这种明确说法，避免把别处的数字误当成测试数
+    mentioned = [int(n) for n in re.findall(r"(\d{2,4})\s*项", text)]
     if actual and mentioned:
         if actual in mentioned:
             rep.add(PASS, f"README 的测试数 {actual} 与实际一致")
         else:
-            rep.add(FAIL, f"README 写的测试数与实际不符",
+            rep.add(FAIL, "README 写的测试数与实际不符",
                     f"README 提到 {sorted(set(mentioned))}，实际 {actual}\n"
-                    f"    修法：把 README 里的数字改成 {actual}")
+                    f"    改法：把 README 里的数字改成 {actual}")
     else:
         rep.add(WARN, f"README 里没写测试数（实际 {actual} 项）")
+
+    # 核心代码行数。
+    # 这条是踩出来的：我改了代码之后 README 里的行数就对不上了，
+    # 而自检当时只查测试数，放过了它。文档里的数字一旦不对就是硬伤。
+    pkg = os.path.join(ROOT, "aliceqq")
+    lines = 0
+    if os.path.isdir(pkg):
+        for root, dirs, files in os.walk(pkg):
+            dirs[:] = [d for d in dirs if d != "__pycache__"]
+            for name in files:
+                if name.endswith(".py"):
+                    try:
+                        lines += sum(1 for _ in open(os.path.join(root, name),
+                                                     encoding="utf-8",
+                                                     errors="ignore"))
+                    except OSError:
+                        pass
+    # README 用约数（"NNNNN 多行"）时只查数量级；写精确值时要求完全一致
+    approx = re.search(r"(\d{3,6})\s*多行", text)
+    exact = re.search(r"核心逻辑\s*(\d{4,6})\s*行", text)
+    if approx:
+        claimed = int(approx.group(1))
+        if abs(claimed - lines) <= 1000:
+            rep.add(PASS, f"README 的代码行数「{claimed} 多行」与实际 {lines} 相符")
+        else:
+            rep.add(WARN, f"README 写「{claimed} 多行」，实际 {lines} 行",
+                    "差得有点多，更新一下 README")
+    elif exact:
+        claimed = int(exact.group(1))
+        if claimed == lines:
+            rep.add(PASS, f"README 的代码行数 {claimed} 与实际一致")
+        else:
+            rep.add(FAIL, "README 的代码行数与实际不符",
+                    f"README 写 {claimed}，实际 {lines}\n"
+                    f"    建议改成约数「{lines // 1000}000 多行」，"
+                    f"免得每次改代码都要同步这个数字")
 
     # 过期的版本名/功能声明
     stale = []
