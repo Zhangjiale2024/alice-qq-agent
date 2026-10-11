@@ -333,6 +333,95 @@ class RobustnessTest(HandlerHarness):
         self.assertFalse(seen[0].has_images)
 
 
+class AdapterImportTest(unittest.TestCase):
+    """导入适配层本身不能炸——**这是 CI 抓到的第一个真问题**。
+
+    CI 上四个 job 全部失败在「跑全部单元测试」，报的是：
+
+        File ".../adapters/nonebot_plugin_alice.py", line 149
+            _sing_python = sys.executable
+        NameError: name 'sys' is not defined
+
+    那个文件用了 `sys.executable` 但**没有 `import sys`**。
+
+    **为什么本地永远测不出来**：那一行的上下文是
+
+        _sing_python = (_config.env("SINGING_PYTHON")
+                        or r"D:\\DSHWORK\\envs\\gptsovits\\Scripts\\python.exe")
+        if not os.path.isfile(_sing_python):      # ← 本地这个文件**存在**
+            _sing_python = sys.executable         # ← 所以这行不执行
+
+    本机那个硬编码路径确实存在，所以 `if` 判定为假，`sys.executable`
+    那一行**从来没被执行过**。CI（Ubuntu、Windows）上没有这个路径，
+    于是走到那一行就炸。
+
+    更糟的是：本地连 `if HAS_NONEBOT:` 整块都不执行（两套环境里
+    只有 `.venv` 装了 nonebot，gptsovits 环境没有）。所以这个 bug
+    需要"装了 NoneBot **且** 那个硬编码路径不存在"两个条件同时成立
+    才会出现——本地恰好凑不齐。
+
+    这组用例把两个条件都造出来。
+    """
+
+    def test_adapter_imports_when_default_singing_python_missing(self):
+        """默认 SINGING_PYTHON 路径不存在时，导入不能炸。
+
+        用假的 `os.path.isfile` 让那个硬编码路径判定为不存在，
+        强制走到 `sys.executable` 那一行——就是 CI 上的真实情形。
+        """
+        import os as os_mod
+
+        real_isfile = os_mod.path.isfile
+
+        def fake_isfile(path):
+            text = str(path)
+            if text.endswith("python.exe") and "gptsovits" in text:
+                return False
+            return real_isfile(path)
+
+        saved = os_mod.environ.pop("SINGING_PYTHON", None)
+        os_mod.path.isfile = fake_isfile
+        try:
+            mod = stub.load_adapter()
+        finally:
+            os_mod.path.isfile = real_isfile
+            if saved is not None:
+                os_mod.environ["SINGING_PYTHON"] = saved
+
+        import sys as sys_mod
+        self.assertTrue(getattr(mod, "HAS_NONEBOT", False))
+        self.assertEqual(getattr(mod, "_sing_python", None), sys_mod.executable,
+                         "默认路径不存在时应当回退到当前解释器")
+
+    def test_sys_is_imported_at_module_level(self):
+        """`sys` 必须在模块级导入。
+
+        静态断言，比"跑一遍看炸不炸"更直接：
+        那一行依赖运行时条件，靠跑不一定覆盖得到。
+        """
+        import ast
+        src = (ROOT / "aliceqq" / "adapters" / "nonebot_plugin_alice.py"
+               ).read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        imported = set()
+        for node in tree.body:                 # 只看模块顶层
+            if isinstance(node, ast.Import):
+                imported.update((a.asname or a.name).split(".")[0]
+                                for a in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imported.update(a.asname or a.name for a in node.names)
+        self.assertIn("sys", imported,
+                      "适配层用了 sys.executable，必须在模块级 import sys")
+
+    def test_no_other_bare_sys_usage_without_import(self):
+        """防止同类问题复发：文件里出现 sys. 就必须有 import sys。"""
+        src = (ROOT / "aliceqq" / "adapters" / "nonebot_plugin_alice.py"
+               ).read_text(encoding="utf-8")
+        if "sys." in src:
+            self.assertIn("\nimport sys", src.replace("\r\n", "\n"),
+                          "用了 sys. 但没有模块级 import sys")
+
+
 class FullPathTest(HandlerHarness):
     """端到端：事件 -> 抽取 -> 引擎 -> 视觉/语音 -> 回复。"""
 

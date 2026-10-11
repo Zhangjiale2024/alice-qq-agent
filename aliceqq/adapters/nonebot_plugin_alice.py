@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 import time
 
 try:  # pragma: no cover - 依赖可选

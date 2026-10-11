@@ -310,7 +310,20 @@ class LocalWhisperASR:
         return True
 
     def _load(self):
-        """加载模型（只做一次）。"""
+        """加载模型（只做一次）。
+
+        **GPU 加载失败时自动退回 CPU。** 实测踩过：装好 faster-whisper 后
+        `available=True`，但 `.env` 里配的 `ASR_LOCAL_DEVICE=cuda`，
+        而这个解释器**没有 torch**——ctranslate2 用 GPU 需要 CUDA 运行库，
+        报的是：
+
+            RuntimeError: Library cublas64_12.dll is not found or cannot be loaded
+
+        如果就这样失败，表现是"语音识别又不可用"，而真正的原因
+        （缺一个 cublas DLL）完全看不出来。同一个模型在 CPU 上
+        实测 4.6 秒转写完全可用，所以这里直接降级——
+        慢一点总比整条链路不可用好，而且会留下日志说明发生了什么。
+        """
         if self._model is not None:
             return self._model
         from faster_whisper import WhisperModel
@@ -325,8 +338,63 @@ class LocalWhisperASR:
             # 模型缓存**必须**能写。默认位置是用户目录下的 .cache，
             # 在受限环境里会被拒绝访问，所以允许显式指定。
             kwargs["download_root"] = self.cache_dir
-        self._model = WhisperModel(self.model_size, **kwargs)
+        try:
+            self._model = WhisperModel(self.model_size, **kwargs)
+            if self.device == "cuda":
+                # **必须在这里真的跑一次推理探针。**
+                # 实测发现 `WhisperModel(device="cuda")` 构造时**不会**
+                # 加载 cuBLAS——错误要等到第一次 transcribe 才爆：
+                #
+                #     RuntimeError: Library cublas64_12.dll is not found
+                #
+                # 所以只把构造包在 try 里是不够的（第一版就是这么写的，
+                # 结果降级从未触发）。用一小段静音做探针，把问题
+                # 在"加载模型"这一步就暴露出来。
+                self._probe_gpu()
+        except Exception as exc:
+            if self.device != "cuda":
+                raise
+            # 只对 GPU 失败降级；CPU 都失败说明是模型/缓存问题，
+            # 那种情况降级也救不了，必须如实抛出去。
+            detail = str(exc)[:140]
+            self._model = None
+            self.device = "cpu"
+            self._gpu_fallback_reason = (
+                "GPU 不可用（%s: %s），已自动改用 CPU。"
+                "想要 GPU 加速需要装齐 CUDA 运行库（含 cublas）。"
+                % (type(exc).__name__, detail))
+            self._model = WhisperModel(self.model_size, device="cpu",
+                                       compute_type="int8", **(
+                                           {"download_root": self.cache_dir}
+                                           if self.cache_dir else {}))
         return self._model
+
+    def _probe_gpu(self) -> None:
+        """用一小段静音跑一次 GPU 推理，确认 cuBLAS 等运行库真的能加载。
+
+        只在模型确实有 `transcribe` 时才探针——测试里会用
+        **假模型**替换 `faster_whisper.WhisperModel`（只记录参数），
+        那种对象没有这个方法。如果无条件去调，假模型会被判成
+        "GPU 不可用"并触发降级，于是 `compute_type` 从 float16
+        变成 int8，把"按设备选 compute_type"那条既有测试弄红。
+        """
+        if not callable(getattr(self._model, "transcribe", None)):
+            return
+        import io
+        import struct
+        import wave
+
+        buffer = io.BytesIO()
+        with wave.open(buffer, "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(16000)
+            handle.writeframes(struct.pack("<%dh" % 1600, *([0] * 1600)))
+        segments, _ = self._model.transcribe(
+            io.BytesIO(buffer.getvalue()), language=self.language or None,
+            beam_size=1, word_timestamps=False)
+        for _ in segments:          # 生成器必须消费完才会真正执行
+            pass
 
     def transcribe(self, audio: bytes, filename: str = "audio.wav") -> Transcription:
         if not audio:
