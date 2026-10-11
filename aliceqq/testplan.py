@@ -48,9 +48,20 @@ def env_checks() -> List[Check]:
                             required=False))
 
     has_key = bool(config.llm.api_key)
+    # **没配 Key 不算"必须解决"**（所以 required=False）。
+    #
+    # 实测踩过：CI 上 `python -m aliceqq --test-plan` 退出码 1，
+    # 四个 job 都挂在最后一步，报的是"存在必须解决的问题"——
+    # 而唯一标为「缺失」的就是这一项。CI 是**刻意不装依赖、不配 key**
+    # 的离线环境，这个项目也明确支持离线跑（README：不需要 API Key
+    # 也能 --demo / --repl），所以把它当阻塞项是个假警报。
+    #
+    # 真实的部署环境里确实该配 Key，但那属于"想接真模型"的增强，
+    # 不是"项目有问题"。
     checks.append(Check("模型 API Key", has_key,
                         f"已配置（{config.llm.model} @ {config.llm.base_url}）" if has_key
-                        else "未配置，只能用离线 mock"))
+                        else "未配置——**不影响离线使用**（测试、演示、本地聊天都能跑）",
+                        required=False))
     checks.append(Check("owner 列表", bool(config.bot.owner_ids),
                         "、".join(config.bot.owner_ids) or "未配置：没人能执行 /授权 与 /资料"))
 
