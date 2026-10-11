@@ -19,6 +19,7 @@ from . import knowledge as knowledge_mod
 from . import memory as memory_mod
 from . import moderation as moderation_mod
 from . import prompt as prompt_mod
+from . import asr as asr_mod
 from . import tools as tools_mod
 from . import vision as vision_mod
 from .config import AppConfig, GroupSettings
@@ -97,10 +98,25 @@ class IncomingMessage:
     # 类型写 Any 是为了让 engine 不依赖 vision 模块——核心包要保持
     # 零第三方依赖，也要保持能独立测试。实际放的是 vision.ImageRef。
     images: List[Any] = field(default_factory=list)
+    # 用户这次发来的语音。
+    #
+    # 和图片是同一个道理，但**这里以前更彻底地被丢掉了**：
+    # ASR 能力早就有（`asr.py`），却只用在"转写 B 站视频音轨"那条链路上，
+    # 用户直接发来的语音消息一次都没有被识别过。
+    # 同样写 Any 以免 engine 依赖 asr 模块的具体类型（实际是 asr.AudioRef）。
+    audios: List[Any] = field(default_factory=list)
 
     @property
     def has_images(self) -> bool:
         return bool(self.images)
+
+    @property
+    def has_audios(self) -> bool:
+        return bool(self.audios)
+
+    @property
+    def has_media_input(self) -> bool:
+        return bool(self.images or self.audios)
 
     @property
     def scene_id(self) -> str:
@@ -212,6 +228,9 @@ class Engine:
         # 用"每轮清一次"的实例属性，避免上一轮的图片描述串到这一轮
         # （和 _pending_search 是同一个套路，那里也踩过串轮的坑）。
         self._pending_vision: Optional[vision_mod.VisionResult] = None
+        # 本轮语音转写的结果。同样每轮清一次：
+        # 把 A 的语音转写带进 B 的对话，等于泄漏他说过的话。
+        self._pending_transcript: Optional[asr_mod.Transcription] = None
 
         # V2：联网检索。构建失败也没关系——工具会如实显示为不可用，
         # 引擎不会假装搜过（诚实护栏负责兜底）。
@@ -281,9 +300,17 @@ class Engine:
         self._current_settings = None
 
         # 0) 太短/空消息
-        if not text:
+        #
+        # **带媒体的消息不能因为文字为空就丢掉。** 用户直接甩一张图、
+        # 或者发一条语音不说话，都是很常见的用法；以前的判断只看 text，
+        # 于是这类消息在真实 QQ 上被当成"空消息"直接 return，
+        # 后面的图片理解和语音识别根本没有机会执行
+        # （实测：语音消息 reason='空消息'，_analyze_audio 一次都没被调用）。
+        if not text and not message.has_media_input:
             outcome.reason = "空消息"
             return outcome
+        if not text:
+            outcome.debug["empty_text_with_media"] = True
 
         # 1) 指令优先。
         # 指令是零成本的本地操作，必须排在"群聊触发"和"限流"之前。
@@ -376,7 +403,7 @@ class Engine:
         # 图片理解放在检索之前：它是"看见用户发了什么"，
         # 而检索是"去外面查"。把图先看明白，后续即使要检索，
         # 检索词也能更准（而且模型的整段上下文是完整的）。
-        self._analyze_images(message, outcome)
+        self._analyze_inputs(message, outcome)
         if self._maybe_search(message, outcome):
             # 检索话题不明确：已经给出澄清询问，不要再让模型生成回复覆盖它
             self.storage.append_message(message.user_id, "assistant", outcome.reply or "",
@@ -1343,6 +1370,8 @@ class Engine:
             # 没发图时是空串；发了图但看不到时是一段"你看不到图"的说明
             # ——**这时候也必须注入**，否则模型会以为没图这回事，转而瞎猜。
             "vision_result": self._vision_block(message),
+            # 用户这次发的语音转写。和图片同理：听不到也要说。
+            "transcript": self._transcript_block(message),
             "search_results": self._search_block(message, mode),
             "event_type": "private_message" if message.is_private else "group_message",
             "agent_name": self.config.bot.agent_name,
@@ -1796,13 +1825,113 @@ class Engine:
             return ""
         result = getattr(self, "_pending_vision", None)
         if result is None:
-            # 理论上走不到：handle 里必然先调 _analyze_images。
+            # 理论上走不到：handle 里必然先调 _analyze_inputs。
             # 但真发生了也要如实说，不能让模型以为没图。
             return "（用户发了图片，但这次没有拿到识别结果。）"
         if not result.ok and not self.config.vision.tell_model_when_unavailable:
             return ""
         character = characters_mod.get(self.current_mode(message))
         return vision_mod.render_for_model(result, mode_is_roleplay=character.is_roleplay)
+
+    def _analyze_audio(self, message: IncomingMessage, outcome: Outcome) -> None:
+        """把用户发来的语音转成文字，留给提示词用。
+
+        **这条链路以前是完全断的。** `asr.py` 早就有识别能力，
+        但它只被用在"转写 B 站视频音轨"上；用户直接发的语音消息
+        在适配层就没被抽出来，所以模型收到的是一条空文本，
+        表现就是"发语音它不回"或者"回一句莫名其妙的话"。
+
+        和图片一样，这是**感知**步骤而不是工具：
+        "用户说了话"是事实，模型没法决定不听。
+
+        转写结果要连同**质量警告**一起注入。ASR 在噪声上会输出
+        "通顺但完全错误"的文本，光看文字看不出来——`quality_warning()`
+        就是为这种情况写的，这里必须用上，否则等于把错误信息
+        当成用户原话交给模型。
+        """
+        self._pending_transcript = None
+        if not message.has_audios:
+            return
+
+        audios = list(message.audios)
+        outcome.debug["audios_received"] = len(audios)
+
+        if self.asr_client is None or not getattr(self.asr_client, "available", False):
+            reason = "没有可用的语音识别"
+            self._pending_transcript = asr_mod.Transcription(False, error=reason)
+            outcome.debug["asr"] = {"ok": False, "reason": reason, "audios": len(audios)}
+            return
+
+        ref = audios[0]                       # 一条消息里的语音只认第一条
+        blob = ref.read_bytes() if hasattr(ref, "read_bytes") else b""
+        if not blob:
+            reason = "语音读取失败"
+            self._pending_transcript = asr_mod.Transcription(False, error=reason)
+            outcome.debug["asr"] = {"ok": False, "reason": reason, "audios": len(audios)}
+            return
+
+        if not self._feature_allowed(message, "asr_voice"):
+            reason = self._last_block_reason or "本群或额度不允许"
+            self._pending_transcript = asr_mod.Transcription(
+                False, error="当前不允许识别语音（%s）" % reason)
+            outcome.debug["asr"] = {"ok": False, "reason": reason, "blocked": True,
+                                    "audios": len(audios)}
+            return
+
+        started = time.time()
+        try:
+            result = self.asr_client.transcribe(blob, getattr(ref, "filename", "voice.m4a"))
+        except Exception as exc:
+            result = asr_mod.Transcription(
+                False, error="%s: %s" % (type(exc).__name__, str(exc)[:120]))
+        self._pending_transcript = result
+        text = (result.text or "").strip()
+        outcome.debug["asr"] = {
+            "ok": result.ok,
+            "chars": len(text),
+            "seconds": round(result.seconds or 0.0, 1),
+            "elapsed": round(time.time() - started, 2),
+            "audios": len(audios),
+            "error": result.error,
+        }
+        if result.ok and text:
+            consume_feature_quota(self.storage, self.config, "asr_voice",
+                                  message.user_id, message.group_id,
+                                  message.is_private)
+
+    def _transcript_block(self, message: IncomingMessage) -> str:
+        """给提示词用的语音转写区块。没有语音就返回空串。"""
+        if not message.has_audios:
+            return ""
+        result = getattr(self, "_pending_transcript", None)
+        if result is None:
+            return "（用户发了语音，但这次没有拿到识别结果。）"
+
+        if not result.ok or not (result.text or "").strip():
+            why = result.error or "识别没有返回内容"
+            return ("（用户这次发的是**语音**，但你没有听到内容——%s。"
+                    "请如实告诉用户你没能听清，可以请他再说一遍或者打字，"
+                    "**不要猜测他说了什么**。）" % why)
+
+        # 质量不可靠时必须说明。ASR 在噪声/背景音乐上会输出
+        # 通顺但完全错误的文本，用户看不出来，模型更看不出来。
+        warning = asr_mod.quality_warning(
+            result.text, seconds=result.seconds,
+            avg_logprob=result.avg_logprob, no_speech_prob=result.no_speech_prob)
+        head = "（以下是用户刚发的语音转写成的文字，可能有错别字或同音字错误）"
+        body = result.text.strip()
+        if warning:
+            return head + "\n" + body + "\n注意：" + warning
+        return head + "\n" + body
+
+    def _analyze_inputs(self, message: IncomingMessage, outcome: Outcome) -> None:
+        """本轮的**多模态输入**统一入口：先看图，再看语音。
+
+        收敛成一个入口是为了以后加视频之类的输入时，
+        不用在多处改调用点（`handle` 里只认这一个方法）。
+        """
+        self._analyze_images(message, outcome)
+        self._analyze_audio(message, outcome)
 
     def _maybe_search(self, message: IncomingMessage, outcome: Outcome) -> bool:
         """时效性问题先检索，把结果作为上下文注入。

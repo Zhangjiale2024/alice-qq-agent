@@ -26,7 +26,9 @@ try:  # pragma: no cover - 依赖可选
 except ImportError:  # pragma: no cover
     HAS_NONEBOT = False
 
+from .. import asr as asr_mod
 from .. import knowledge as knowledge_mod
+from .. import media_input as media_input_mod
 from .. import media as media_mod
 from .. import policy as policy_mod
 from .. import proactive
@@ -285,34 +287,25 @@ if HAS_NONEBOT:  # pragma: no cover
         return bool(sender and getattr(sender, "user_id", None) == getattr(event, "self_id", None))
 
     def _extract_images(event: MessageEvent) -> list:
-        """把消息里的图片段抽成 vision.ImageRef 列表。
+        """转发到 media_input.segments_to_images。
 
-        只取 `image` 段。QQ 的 `face`（内置表情）拿不到图片数据，
-        所以不在这里处理——那属于"素材入库"流程，会另外提示用户。
-
-        拿不到就返回空列表**并留下日志**：静默返回空会让
-        "为什么它看不见我发的图"变成一个没有任何线索的问题。
+        解析逻辑**不放在这一层**：适配层整个包在 `if HAS_NONEBOT:` 里，
+        没有 NoneBot 的环境（包括 CI）执行不到，于是那层逻辑一行都测不到。
+        详见 media_input.py 的模块说明。
         """
-        refs: list = []
         try:
-            for segment in event.get_message():
-                if str(getattr(segment, "type", "")) != "image":
-                    continue
-                data = dict(getattr(segment, "data", {}) or {})
-                url = str(data.get("url") or "")
-                path = str(data.get("file") or "")
-                if not url and not path:
-                    continue
-                refs.append(vision_mod.ImageRef(
-                    url=url, path=path, kind="sticker",
-                    source_hint=str(data.get("file") or url)[:80]))
+            return media_input_mod.segments_to_images(event.get_message(), _debug_log)
         except Exception as exc:
-            _debug_log(f"_extract_images 解析失败，本轮按『没有图片』处理："
-                       f"{type(exc).__name__}: {exc}")
+            _debug_log(f"_extract_images 失败，本轮按『没有图片』处理：{exc}")
             return []
-        if refs:
-            _debug_log(f"本轮收到 {len(refs)} 张图片")
-        return refs
+
+    def _extract_audios(event: MessageEvent) -> list:
+        """转发到 media_input.segments_to_audios。理由同 _extract_images。"""
+        try:
+            return media_input_mod.segments_to_audios(event.get_message(), _debug_log)
+        except Exception as exc:
+            _debug_log(f"_extract_audios 失败，本轮按『没有语音』处理：{exc}")
+            return []
 
     async def _record_admin(bot: Bot, event: MessageEvent, group_id: str) -> None:
         """把群主/管理员记进群配置，供权限判断使用。
@@ -600,6 +593,7 @@ if HAS_NONEBOT:  # pragma: no cover
         # 在真实 QQ 上根本无从谈起。文本为空但有图的情况也很常见
         # （用户直接甩一张图不说话），那种消息以前会被当成空消息跳过。
         images = _extract_images(event)
+        audios = _extract_audios(event)
 
         incoming = IncomingMessage(
             user_id=str(event.user_id),
@@ -613,6 +607,7 @@ if HAS_NONEBOT:  # pragma: no cover
             message_id=str(getattr(event, "message_id", "")),
             timestamp=float(getattr(event, "time", time.time())),
             images=images,
+            audios=audios,
         )
 
         if _debug:

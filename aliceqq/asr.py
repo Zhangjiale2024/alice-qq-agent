@@ -24,13 +24,61 @@ import json
 import urllib.error
 import urllib.request
 import uuid
-from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 
 # 单次识别的体积上限（音频按 64kbps 估算：1 分钟约 0.5MB）
 DEFAULT_MAX_BYTES = 8 * 1024 * 1024
 DEFAULT_MAX_SECONDS = 300
 DEFAULT_TIMEOUT = 120
+
+# 用户一条语音消息的体积上限。
+# 比上面那个 DEFAULT_MAX_BYTES 小得多，因为场景完全不同：
+# 那个是转写视频音轨（可能几分钟），这个是"群友随口说一句"。
+# QQ 语音消息通常十几秒、几十 KB，给它 2MB 已经很宽松了。
+VOICE_MESSAGE_MAX_BYTES = 2 * 1024 * 1024
+
+
+@dataclass
+class AudioRef:
+    """用户发来的一段语音。
+
+    和 vision.ImageRef 是同一个思路：适配层只负责说"这里有段音频、
+    它在哪"，真正的读取和识别由引擎侧完成。
+
+    `url` 和 `path` 至少有其一。QQ 的 record 段通常给 http(s) 地址，
+    也可能给本地缓存路径。`blob` 是已经读到的字节，优先级最高。
+    """
+
+    url: str = ""
+    path: str = ""
+    blob: bytes = b""
+    filename: str = "voice.m4a"
+    duration: float = 0.0          # 秒；QQ 有时会给，0 表示未知
+    source_hint: str = ""
+
+    def read_bytes(self) -> bytes:
+        """取到音频字节。失败或超限返回空 bytes（调用方据此如实报错）。"""
+        if self.blob:
+            # **这里以前直接 return，漏了体积检查**——
+            # 文件分支检查了、blob 分支没有，于是"已经读进内存的大音频"
+            # 会绕过上限直接送进识别。测试抓到了这个不一致。
+            if len(self.blob) > VOICE_MESSAGE_MAX_BYTES:
+                return b""
+            return self.blob
+        target = self.url or self.path
+        if not target:
+            return b""
+        try:
+            # read_media_bytes 支持本地路径与 http(s) 两种来源。
+            # 它本身没有体积参数，所以取到之后自己判断。
+            from .media import read_media_bytes
+            data = read_media_bytes(target) or b""
+        except Exception:
+            return b""
+        if len(data) > VOICE_MESSAGE_MAX_BYTES:
+            return b""
+        return data
 
 
 @dataclass
