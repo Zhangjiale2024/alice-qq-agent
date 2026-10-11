@@ -31,6 +31,7 @@ from .. import media as media_mod
 from .. import policy as policy_mod
 from .. import proactive
 from .. import singing as singing_mod
+from .. import vision as vision_mod
 from ..config import AppConfig
 from ..engine import Engine, IncomingMessage
 
@@ -282,6 +283,36 @@ if HAS_NONEBOT:  # pragma: no cover
         reply = getattr(event, "reply", None)
         sender = getattr(reply, "sender", None) if reply is not None else None
         return bool(sender and getattr(sender, "user_id", None) == getattr(event, "self_id", None))
+
+    def _extract_images(event: MessageEvent) -> list:
+        """把消息里的图片段抽成 vision.ImageRef 列表。
+
+        只取 `image` 段。QQ 的 `face`（内置表情）拿不到图片数据，
+        所以不在这里处理——那属于"素材入库"流程，会另外提示用户。
+
+        拿不到就返回空列表**并留下日志**：静默返回空会让
+        "为什么它看不见我发的图"变成一个没有任何线索的问题。
+        """
+        refs: list = []
+        try:
+            for segment in event.get_message():
+                if str(getattr(segment, "type", "")) != "image":
+                    continue
+                data = dict(getattr(segment, "data", {}) or {})
+                url = str(data.get("url") or "")
+                path = str(data.get("file") or "")
+                if not url and not path:
+                    continue
+                refs.append(vision_mod.ImageRef(
+                    url=url, path=path, kind="sticker",
+                    source_hint=str(data.get("file") or url)[:80]))
+        except Exception as exc:
+            _debug_log(f"_extract_images 解析失败，本轮按『没有图片』处理："
+                       f"{type(exc).__name__}: {exc}")
+            return []
+        if refs:
+            _debug_log(f"本轮收到 {len(refs)} 张图片")
+        return refs
 
     async def _record_admin(bot: Bot, event: MessageEvent, group_id: str) -> None:
         """把群主/管理员记进群配置，供权限判断使用。
@@ -562,6 +593,14 @@ if HAS_NONEBOT:  # pragma: no cover
         is_private = isinstance(event, PrivateMessageEvent)
         group_id = "" if is_private else str(getattr(event, "group_id", ""))
 
+        # 用户这次发的图片要带进消息里，否则模型看不到图。
+        #
+        # **这里以前是完全丢弃的**：只取 `get_plaintext()`，
+        # 图片段既不进 text 也不进别的字段，所以"理解图片"这件事
+        # 在真实 QQ 上根本无从谈起。文本为空但有图的情况也很常见
+        # （用户直接甩一张图不说话），那种消息以前会被当成空消息跳过。
+        images = _extract_images(event)
+
         incoming = IncomingMessage(
             user_id=str(event.user_id),
             text=text,
@@ -573,6 +612,7 @@ if HAS_NONEBOT:  # pragma: no cover
             is_command=_is_command(event),
             message_id=str(getattr(event, "message_id", "")),
             timestamp=float(getattr(event, "time", time.time())),
+            images=images,
         )
 
         if _debug:

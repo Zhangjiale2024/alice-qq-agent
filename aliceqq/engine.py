@@ -20,6 +20,7 @@ from . import memory as memory_mod
 from . import moderation as moderation_mod
 from . import prompt as prompt_mod
 from . import tools as tools_mod
+from . import vision as vision_mod
 from .config import AppConfig, GroupSettings
 from . import db as db_mod
 from .db import Storage
@@ -87,6 +88,19 @@ class IncomingMessage:
     message_id: str = ""
     timestamp: float = field(default_factory=time.time)
     raw: Dict[str, Any] = field(default_factory=dict)
+    # 用户这次发来的图片。
+    #
+    # **这是"能发图"到"看得懂图"的关键一步。** 在此之前，适配层把图片
+    # 归为 sticker 存进素材库就结束了，消息里根本没有"这张图"这个信息，
+    # 模型只能靠文件名和用户的话猜图里有什么。
+    #
+    # 类型写 Any 是为了让 engine 不依赖 vision 模块——核心包要保持
+    # 零第三方依赖，也要保持能独立测试。实际放的是 vision.ImageRef。
+    images: List[Any] = field(default_factory=list)
+
+    @property
+    def has_images(self) -> bool:
+        return bool(self.images)
 
     @property
     def scene_id(self) -> str:
@@ -188,6 +202,17 @@ class Engine:
         except Exception:
             self.asr_client = None
 
+        # 图片理解（可选）。没配 to 就是 None，此时引擎会**明确告诉模型
+        # "这次看不到图"**，而不是让它根据用户的描述瞎猜图里有什么。
+        try:
+            self.vision_client = vision_mod.build_client(self.config.vision)
+        except Exception:
+            self.vision_client = None
+        # 本轮图片理解的结果，供 build_context 注入提示词用。
+        # 用"每轮清一次"的实例属性，避免上一轮的图片描述串到这一轮
+        # （和 _pending_search 是同一个套路，那里也踩过串轮的坑）。
+        self._pending_vision: Optional[vision_mod.VisionResult] = None
+
         # V2：联网检索。构建失败也没关系——工具会如实显示为不可用，
         # 引擎不会假装搜过（诚实护栏负责兜底）。
         try:
@@ -248,6 +273,11 @@ class Engine:
         self._pending_search = None  # 清掉上一轮的检索结果，避免串轮
         self._pending_academic = None
         self._pending_search_owner = None
+        # 图片描述同样要清。**这个坑在检索那边踩过一次**：
+        # "群 A 的检索结果渲染到群 B"，因为 _pending_search_owner 是实例属性，
+        # 忘了清就会把上一轮（甚至上一个人）的结果带进来。图片更敏感——
+        # 把 A 发的图描述给 B 看，等于泄漏内容。
+        self._pending_vision = None
         self._current_settings = None
 
         # 0) 太短/空消息
@@ -343,6 +373,10 @@ class Engine:
         # 5) 正常对话
         self.record(message, now)
         self._remember_from_message(message, outcome, now)
+        # 图片理解放在检索之前：它是"看见用户发了什么"，
+        # 而检索是"去外面查"。把图先看明白，后续即使要检索，
+        # 检索词也能更准（而且模型的整段上下文是完整的）。
+        self._analyze_images(message, outcome)
         if self._maybe_search(message, outcome):
             # 检索话题不明确：已经给出澄清询问，不要再让模型生成回复覆盖它
             self.storage.append_message(message.user_id, "assistant", outcome.reply or "",
@@ -1305,6 +1339,10 @@ class Engine:
                                                          message.is_private, message.group_id),
             "media_catalog": self._media_catalog(message),
             "media_intent": self._media_intent(message),
+            # 用户这次发的图片的识别结果。
+            # 没发图时是空串；发了图但看不到时是一段"你看不到图"的说明
+            # ——**这时候也必须注入**，否则模型会以为没图这回事，转而瞎猜。
+            "vision_result": self._vision_block(message),
             "search_results": self._search_block(message, mode),
             "event_type": "private_message" if message.is_private else "group_message",
             "agent_name": self.config.bot.agent_name,
@@ -1687,6 +1725,84 @@ class Engine:
                 flags.append(f"本群每日额度={settings.quota_daily}")
             lines.append("本群功能开关：" + "、".join(flags))
         return "\n".join(lines)
+
+    def _analyze_images(self, message: IncomingMessage, outcome: Outcome) -> None:
+        """把用户发来的图片交给视觉模型，结果留给提示词用。
+
+        **为什么它是"感知"步骤而不是一个工具。**
+        工具是模型自己决定要不要调的（比如要不要联网查）。但"用户发了图"
+        是**事实**——模型没法"决定不看"，它得先知道图里有什么，才有得选。
+        所以这里直接在当前轮算好，注入上下文。
+
+        三种情况都要有明确行为，不能静默：
+
+          1. 用户没发图 -> 什么都不做
+          2. 发了图但没有视觉模型 -> 注入一段"你看不到图"的说明，
+             让模型如实告诉用户，而不是根据用户的话猜图里是什么
+          3. 额度不足 -> 同样注入说明，并说明是额度问题
+
+        这一步**不阻塞回复**：视觉调用失败时，对话照常进行，
+        只是模型会知道"这次没看到图"。
+        """
+        self._pending_vision = None
+        if not message.has_images:
+            return
+
+        images = list(message.images)
+        outcome.debug["images_received"] = len(images)
+
+        if self.vision_client is None:
+            # 没配视觉模型：不调用，但要让模型知道"有图且我看不到"。
+            reason = "没有配置视觉模型"
+            if self.config.vision.enabled:
+                reason = "视觉模型没有配置完整（检查 VISION_BASE_URL / API_KEY / MODEL）"
+            self._pending_vision = vision_mod.VisionResult(False, error=reason)
+            outcome.debug["vision"] = {"ok": False, "reason": reason,
+                                       "images": len(images)}
+            return
+
+        if not self._feature_allowed(message, "vision"):
+            reason = self._last_block_reason or "本群或额度不允许"
+            self._pending_vision = vision_mod.VisionResult(
+                False, error="当前不允许使用图片理解（%s）" % reason)
+            outcome.debug["vision"] = {"ok": False, "reason": reason,
+                                       "blocked": True, "images": len(images)}
+            return
+
+        started = time.time()
+        try:
+            result = self.vision_client.describe(images)
+        except Exception as exc:
+            # 视觉是可选增强，任何异常都不能影响主流程
+            result = vision_mod.VisionResult(
+                False, error="%s: %s" % (type(exc).__name__, str(exc)[:120]))
+        self._pending_vision = result
+        outcome.debug["vision"] = {
+            "ok": result.ok,
+            "images": result.images_seen,
+            "skipped": result.skipped,
+            "elapsed": round(result.elapsed or (time.time() - started), 2),
+            "model": result.model,
+            "error": result.error,
+        }
+        if result.ok:
+            consume_feature_quota(self.storage, self.config, "vision",
+                                  message.user_id, message.group_id,
+                                  message.is_private)
+
+    def _vision_block(self, message: IncomingMessage) -> str:
+        """给提示词用的图片理解区块。没有图就返回空串。"""
+        if not message.has_images:
+            return ""
+        result = getattr(self, "_pending_vision", None)
+        if result is None:
+            # 理论上走不到：handle 里必然先调 _analyze_images。
+            # 但真发生了也要如实说，不能让模型以为没图。
+            return "（用户发了图片，但这次没有拿到识别结果。）"
+        if not result.ok and not self.config.vision.tell_model_when_unavailable:
+            return ""
+        character = characters_mod.get(self.current_mode(message))
+        return vision_mod.render_for_model(result, mode_is_roleplay=character.is_roleplay)
 
     def _maybe_search(self, message: IncomingMessage, outcome: Outcome) -> bool:
         """时效性问题先检索，把结果作为上下文注入。

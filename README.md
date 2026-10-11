@@ -1,13 +1,14 @@
 # Alice QQ Agent
 
-一个运行在 QQ 上的 LLM Agent。
+一个面向真实消息平台的可控多模态 Agent。
 
-它可以根据消息决定是否调用工具，查询最新信息，保存用户主动要求记住的内容，也会在操作失败时直接说明失败原因。
+它可以理解用户发来的图片，根据消息决定是否调用工具，查询最新信息，
+保存用户主动要求记住的内容，也会在操作失败时直接说明失败原因。
 
-目前有 715 项离线测试。核心逻辑约 14,400 行，不依赖第三方 Python 包。
+目前有 753 项离线测试。核心逻辑约 14,800 行，不依赖第三方 Python 包。
 
 <p>
-<img alt="tests" src="https://img.shields.io/badge/tests-715%20passing-brightgreen">
+<img alt="tests" src="https://img.shields.io/badge/tests-753%20passing-brightgreen">
 <img alt="deps" src="https://img.shields.io/badge/core%20deps-none-blue">
 <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-blue">
 <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
@@ -19,6 +20,7 @@
 
 最初只是想做一个能在 QQ 上聊天的机器人。后来发现，聊天里有几件事不能只靠模型自己说：
 
+- 用户发来一张图，确实要看懂上面是什么；
 - 用户说“记住这个”，确实要写进数据库；
 - 用户问最新活动，确实要查资料；
 - 群里出现广告，至少要先判断是否符合规则；
@@ -47,6 +49,52 @@
 ```
 
 这句话不是只由模型口头承诺，背后确实完成了一次写库。
+
+## 图片理解
+
+用户发来的图片会真的送到视觉模型去看，识别结果注入对话上下文。
+
+这一块以前是缺的：适配层只取了 `get_plaintext()`，图片段既不进文本也不进
+别的字段，所以模型看不到图，只能靠文件名和用户的话去猜。
+`Message` 的类型注解是 `Dict[str, str]`，也装不下多模态消息的 `content` 数组。
+
+现在支持的链路是：
+
+```text
+QQ 的 image 段
+  -> 适配层抽成 ImageRef（带 url 或本地路径）
+  -> IncomingMessage.images
+  -> 引擎调视觉模型（OpenAI 兼容的 image_url 协议）
+  -> 识别结果注入系统提示词
+  -> 模型据此回应
+```
+
+走的是 OpenAI 兼容的视觉接口，**不绑定厂商**——
+`qwen-vl`、`glm-4v`、`kimi`、本地 ollama 都是同一个协议：
+
+```bash
+VISION_ENABLED=1
+VISION_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+VISION_API_KEY=sk-xxx
+VISION_MODEL=qwen3-vl-plus
+```
+
+几个刻意的设计：
+
+**它是"感知"步骤，不是工具。** 工具是模型自己决定要不要调的，
+但"用户发了图"是事实——模型没法决定不看。所以视觉结果直接注入上下文，
+而不是挂成一个 `describe_image` 工具等模型来调。
+
+**看不到也要说出来。** 没配视觉模型、额度不足、识别失败时，
+提示词里会注入一段"你这次没有看到图片内容"，并明确要求模型
+如实告诉用户、**不要猜图里是什么**。不注入的话，模型会以为没图这回事，
+转而根据用户的话编一个画面出来。
+
+**按张独立计额度。** 和"生成图片"是两件事，额度分开算，
+一次最多看 3 张（群聊里连发多图很常见，不设上限成本会翻倍）。
+
+**不串轮。** 上一轮的图片描述不会带到下一轮——
+把 A 发的图描述给 B 看就是泄漏内容。这条有专门的测试守着。
 
 使用 `--trace` 可以查看这条链路：
 

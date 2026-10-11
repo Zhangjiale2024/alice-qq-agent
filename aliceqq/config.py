@@ -246,6 +246,10 @@ class QuotaConfig:
     daily_search_global: int = 1000
     daily_image: int = 20
     daily_voice: int = 20
+    # 图片理解按张计费（和"生成图片"是两件事，所以额度也分开）。
+    # 默认比其他高成本能力宽松一点：看图是**理解用户已经发来的东西**，
+    # 不给看会直接影响对话体验；而生成图片是"创造新内容"，可以更保守。
+    daily_vision: int = 100
 
 
 @dataclass
@@ -290,6 +294,31 @@ class SearchConfig:
     # 查询消歧：把"蔚蓝档案"补成"蔚蓝档案 手游"。
     # 对 360 不需要；换用 bing 等会把系列名拆词匹配的源时应打开。
     disambiguate: bool = False
+
+
+@dataclass
+class VisionConfig:
+    """图片理解。
+
+    **这是项目从"能发图"走到"看得懂图"的那一步。**
+    在此之前用户发的图只会被存进素材库，从来没送给模型看过，
+    所以模型只能靠文件名和用户的话去猜图里有什么。
+
+    走 OpenAI 兼容的视觉接口，不绑定厂商：
+    qwen-vl / glm-4v / kimi / 本地 ollama 都是同一个协议，
+    换 base_url 和 model 即可。默认关闭——它按张计费，
+    而且没配好时应该明确"看不到"，而不是静默失效。
+    """
+    enabled: bool = False
+    base_url: str = ""                   # 例：https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key: str = ""
+    model: str = ""                      # 例：qwen-vl-max
+    timeout: int = 60
+    max_tokens: int = 400
+    # 一次最多看几张。群聊里连发多图很常见，不设上限成本会翻倍。
+    max_images_per_turn: int = 3
+    # 是否把"这一次看不到图"如实告诉模型（关掉的话它会瞎猜）
+    tell_model_when_unavailable: bool = True
 
 
 @dataclass
@@ -720,6 +749,7 @@ class AppConfig:
     academic: AcademicConfig = field(default_factory=AcademicConfig)
     asr: AsrConfig = field(default_factory=AsrConfig)
     media: MediaConfig = field(default_factory=MediaConfig)
+    vision: VisionConfig = field(default_factory=VisionConfig)
     features: FeatureConfig = field(default_factory=FeatureConfig)
     raw_env: Dict[str, str] = field(default_factory=dict, repr=False)
 
@@ -917,6 +947,23 @@ class AppConfig:
                 _pick(merged, "ACADEMIC_CACHE_TTL", "academic_cache_ttl_seconds"), 1800),
         )
 
+        vision = VisionConfig(
+            enabled=_as_bool(_pick(merged, "VISION_ENABLED", "vision_enabled"), False),
+            base_url=str(_pick(merged, "VISION_BASE_URL", "vision_base_url",
+                               default="") or "").rstrip("/"),
+            api_key=str(_pick(merged, "VISION_API_KEY", "vision_api_key",
+                               default="") or ""),
+            model=str(_pick(merged, "VISION_MODEL", "vision_model",
+                            default="") or ""),
+            timeout=_as_int(_pick(merged, "VISION_TIMEOUT", "vision_timeout"), 60),
+            max_tokens=_as_int(_pick(merged, "VISION_MAX_TOKENS", "vision_max_tokens"), 400),
+            max_images_per_turn=_as_int(
+                _pick(merged, "VISION_MAX_IMAGES", "vision_max_images"), 3),
+            tell_model_when_unavailable=_as_bool(
+                _pick(merged, "VISION_TELL_WHEN_UNAVAILABLE",
+                      "vision_tell_when_unavailable"), True),
+        )
+
         media = MediaConfig(
             enabled=_as_bool(_pick(merged, "MEDIA_ENABLED", "media_enabled"), True),
             path=str(_pick(merged, "MEDIA_PATH", "media_path", default="media")),
@@ -1042,7 +1089,8 @@ class AppConfig:
 
         return cls(bot=bot, llm=llm, memory=memory, private=private, group=group,
                    proactive=proactive, quota=quota, search=search, academic=academic,
-                   asr=asr, media=media, features=features, raw_env=merged)
+                   asr=asr, media=media, features=features, raw_env=merged,
+                   vision=vision)
 
     # 所有凭据字段的统一脱敏表：{配置段: [字段名]}
     SECRET_FIELDS = {

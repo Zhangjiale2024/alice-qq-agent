@@ -116,9 +116,14 @@ FEATURE_QUOTA_SCOPES = {
     "voice": ("quota_voice_user", "quota_voice_group", "quota_voice_global"),
     # 语音识别：按时长计费，单独计额度
     "asr": ("quota_asr_user", "quota_asr_group", "quota_asr_global"),
+    # 图片理解：**按张计费**，和"生成图片"是两件事，所以单独一项。
+    # 群聊里连发多图很常见，不独立计额度的话，一次刷图就会把
+    # 其它能力的额度一起吃掉。
+    "vision": ("quota_vision_user", "quota_vision_group", "quota_vision_global"),
 }
 
-FEATURE_LABELS = {"search": "联网检索", "image": "图片", "voice": "语音", "asr": "语音识别"}
+FEATURE_LABELS = {"search": "联网检索", "image": "图片", "voice": "语音",
+                  "asr": "语音识别", "vision": "图片理解"}
 
 
 def check_asr_quota(storage: Storage, config: AppConfig, now: Optional[float] = None) -> Verdict:
@@ -148,6 +153,8 @@ def feature_quota_cap(config: AppConfig, feature: str, is_private: bool) -> int:
         return quota.daily_image
     if feature == "voice":
         return quota.daily_voice
+    if feature == "vision":
+        return quota.daily_vision
     return 0
 
 
