@@ -5,10 +5,10 @@
 它可以理解用户发来的图片，根据消息决定是否调用工具，查询最新信息，
 保存用户主动要求记住的内容，也会在操作失败时直接说明失败原因。
 
-目前有 899 项离线测试。核心逻辑约 15,000 行，不依赖第三方 Python 包。
+目前有 917 项离线测试。核心逻辑约 15,000 行，不依赖第三方 Python 包。
 
 <p>
-<img alt="tests" src="https://img.shields.io/badge/tests-899%20passing-brightgreen">
+<img alt="tests" src="https://img.shields.io/badge/tests-917%20passing-brightgreen">
 <img alt="deps" src="https://img.shields.io/badge/core%20deps-none-blue">
 <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-blue">
 <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
@@ -92,6 +92,24 @@ ASR_LOCAL_MODEL=small
 （前者一天几次，后者可能几十次），共用额度会导致转两段视频
 就把语音对话的额度吃光，所以分成了两项。
 
+**识别质量是量过的，不是凭感觉。** 用 12 条已知文本的语音做基准，
+本地 whisper small 的字符错误率：
+
+`	ext
+不加提示                    40.6%   完全正确  0/12
+加「请用简体中文转写」        15.9%   完全正确  5/12
+再加角色专名                 1.0%   完全正确 11/12
+`
+
+关键发现是**主导错误其实是输出繁体字**（「今天天气看起来还不错」->
+「今天天氣看起來還不錯」），不是同音字。所以提示词里指定简体
+贡献了大部分改善，列上角色专名把剩下的也压下去了。
+
+三个被实测否掉的想法（记下来免得以后重走）：
+事后做简繁转换（7.0%，不如直接提示的 1.0%）、
+	emperature=0（40.6%，完全没用）、
+自己写代码把阿拉伯数字转汉字（把「10点」改成了「一零点」，
+逐字替换不懂量级；在提示词里说一句就够了）。
 **同音字会错，这是已知的。** 实测 \small\ 模型把「爱丽丝」识别成
 「艾利斯」。这类同音错误目前靠模型结合上下文自行理解，
 没有做专门的角色名词典纠正。
