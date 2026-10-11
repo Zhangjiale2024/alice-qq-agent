@@ -81,6 +81,24 @@ class ImageRef:
         """转成 OpenAI 多模态协议能吃的 data URI。失败返回空串。"""
         if self.url.startswith("data:"):
             return self.url
+        # QQ/NapCat 可能直接给 `base64://<数据>`（OneBot 规范允许）。
+        #
+        # **两个字段都要看**：规范里 base64 来自 `file` 字段，而适配层
+        # 把 `file` 放进了 `path`、把 `url` 放进 `url`。第一版只检查
+        # `url`，于是 base64 形式的图片仍然读不到——而语音/视频那边
+        # 走的是 `read_media_bytes`（它已经支持 base64），所以只有图片坏。
+        # 这种"三种模态里坏一种"的偏差最容易漏。
+        for candidate in (self.url, self.path):
+            if candidate.startswith("base64://"):
+                payload = "".join(candidate[len("base64://"):].split())
+                try:
+                    raw = base64.b64decode(payload, validate=False)
+                except Exception:
+                    return ""
+                if not raw or len(raw) > MAX_IMAGE_BYTES:
+                    return ""
+                return "data:%s;base64,%s" % (_guess_mime(raw),
+                                              base64.b64encode(raw).decode("ascii"))
         data = self.blob
         if not data and self.path:
             try:
@@ -88,6 +106,13 @@ class ImageRef:
                     data = fh.read(MAX_IMAGE_BYTES + 1)
             except OSError:
                 return ""
+        if not data and self.url:
+            # http(s) 地址：交给统一的读取函数（它已经有重试和体积上限）
+            try:
+                from .media import read_media_bytes
+                data = read_media_bytes(self.url) or b""
+            except Exception:
+                data = b""
         if not data or len(data) > MAX_IMAGE_BYTES:
             return ""
         mime = _guess_mime(data)

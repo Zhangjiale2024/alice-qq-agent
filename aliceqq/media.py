@@ -289,17 +289,38 @@ def reason_text(reason: str) -> str:
 
 
 def read_media_bytes(source: str, timeout: int = 20, retries: int = 2) -> bytes:
-    """读取媒体字节：本地路径或 http(s) URL 都支持。
+    """读取媒体字节：base64://、本地路径、http(s) URL 都支持。
 
     必须支持 URL —— 真机日志显示 NapCat 给照片的 file 字段是 http 链接，
     早期只认本地文件，导致所有照片被静默跳过。
+
+    **也必须支持 `base64://`**：OneBot v11 规范里 image / record / video
+    三段的 `file` 字段都允许这个形式（见规范里"发送时 file 还支持
+    base64://…"那段）。而 NapCat 配置里如果 enableLocalFile2Url 为 false，
+    它就更可能直接给 base64 而不是可访问的网址。
+    实测过不支持时的表现：返回 0 字节，于是**图片、语音、视频三种模态
+    全部静默失效**，而且没有任何报错——只有"它看不见我发的东西"。
 
     显式禁用系统代理：这台机器的 Windows 代理指向一个没在运行的端口，
     走代理会直接失败；而 QQ 的图片 CDN 在国内，直连即可。
     """
     if not source:
         return b""
-    path = source
+    text = str(source)
+
+    # base64 形式：`base64://<数据>`。注意数据里可能含 `+` `/` `=`，
+    # 也可能带换行，所以解码前先把空白去掉。
+    if text.startswith("base64://"):
+        payload = text[len("base64://"):]
+        payload = "".join(payload.split())
+        try:
+            import base64 as _b64
+            data = _b64.b64decode(payload, validate=False)
+        except Exception:
+            return b""
+        return data[:MAX_BYTES] if len(data) > MAX_BYTES else data
+
+    path = text
     if path.startswith("file:///"):
         path = path[8:]
     elif path.startswith("file://"):
@@ -310,7 +331,7 @@ def read_media_bytes(source: str, timeout: int = 20, retries: int = 2) -> bytes:
                 return handle.read(MAX_BYTES)
     except OSError:
         pass
-    if not source.lower().startswith(("http://", "https://")):
+    if not text.lower().startswith(("http://", "https://")):
         return b""
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     headers = {"User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
